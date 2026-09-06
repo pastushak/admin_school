@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Навантаження — Коломийський ліцей ім. М. Грушевського</title>
+
+<!--
+  РЕДАКТОР ПЕДАГОГІЧНОГО НАВАНТАЖЕННЯ
+  ------------------------------------------------------------------
+  Один HTML-файл. Працює прямо в браузері, спілкується з Supabase.
+  Версія 2: вхід + перегляд планів + РЕДАГУВАННЯ ГОДИН (збереження одразу).
+
+  СТРУКТУРА ФАЙЛУ (згори вниз):
+    1. <style>   — оформлення
+    2. HTML      — три екрани: налаштування / вхід / робочий
+    3. <script>  — логіка: підключення, вхід, завантаження, малювання, редагування
+
+  Редагування: клац по клітинці годин → правка → вихід (Enter/Tab/клік поза) →
+  якщо значення змінилось, летить update у Supabase; суми перераховуються.
+-->
+
+<style>
+  :root {
+    --ink: #1a2332;          /* основний текст — темно-синій, не чорний */
+    --ink-soft: #5a6472;     /* другорядний текст */
+    --line: #d8dde5;         /* лінії таблиці */
+    --line-soft: #eef1f5;    /* світлі лінії/фон рядків */
+    --paper: #ffffff;
+    --field: #f4f6f9;        /* фон полів вводу */
+    --accent: #1b4d7a;       /* акцент — стриманий синій */
+    --ok: #216e39;           /* норма зійшлась */
+    --ok-bg: #e6f4ea;
+    --warn: #8a5a00;         /* потребує уваги */
+    --warn-bg: #fdf3e0;
+    --err: #a52222;          /* розбіжність */
+    --err-bg: #fbeaea;
+    --radius: 8px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Segoe UI", "Roboto", system-ui, sans-serif;
+    color: var(--ink);
+    background: #eef1f5;
+    line-height: 1.5;
+    font-size: 15px;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 24px 20px 80px; }
+
+  header.bar {
+    background: var(--accent);
+    color: #fff;
+    padding: 14px 20px;
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 16px;
+  }
+  header.bar h1 { font-size: 17px; font-weight: 500; margin: 0; }
+  header.bar .who { font-size: 13px; opacity: .9; }
+  header.bar button {
+    background: rgba(255,255,255,.15); color: #fff;
+    border: 1px solid rgba(255,255,255,.35);
+    padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 13px;
+  }
+  header.bar button:hover { background: rgba(255,255,255,.25); }
+
+  .card {
+    background: var(--paper);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 22px;
+    margin-bottom: 20px;
+  }
+  h2 { font-size: 16px; font-weight: 500; margin: 0 0 14px; }
+  label { display: block; font-size: 13px; color: var(--ink-soft); margin: 12px 0 4px; }
+  input, select {
+    width: 100%; padding: 9px 11px; font-size: 14px;
+    border: 1px solid var(--line); border-radius: 6px; background: var(--field);
+    color: var(--ink); font-family: inherit;
+  }
+  input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
+  button.primary {
+    margin-top: 16px; background: var(--accent); color: #fff; border: none;
+    padding: 10px 18px; font-size: 14px; border-radius: 6px; cursor: pointer;
+  }
+  button.primary:hover { background: #163e63; }
+  button.primary:disabled { background: #9aa7b5; cursor: default; }
+
+  .hint { font-size: 13px; color: var(--ink-soft); margin: 6px 0 0; }
+  .msg { margin-top: 12px; padding: 10px 12px; border-radius: 6px; font-size: 13px; display: none; }
+  .msg.err { background: var(--err-bg); color: var(--err); display: block; }
+  .msg.ok  { background: var(--ok-bg); color: var(--ok); display: block; }
+
+  .toolbar { display: flex; gap: 14px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 18px; }
+  .toolbar .field { flex: 1; min-width: 220px; }
+  .toolbar label { margin-top: 0; }
+
+  /* Таблиця плану */
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  thead th {
+    text-align: left; font-weight: 500; color: var(--ink-soft);
+    border-bottom: 2px solid var(--line); padding: 8px 10px; font-size: 13px;
+  }
+  th.num, td.num { text-align: center; width: 62px; }
+
+  /* Редаговані клітинки годин */
+  td.edit { cursor: pointer; border-radius: 5px; }
+  td.edit:hover { background: #eef4fb; box-shadow: inset 0 0 0 1px var(--line); }
+  td.edit:focus-within { background: #fff; }
+  td.edit input {
+    width: 48px; padding: 3px 4px; text-align: center; font-size: 14px;
+    border: 1px solid var(--accent); border-radius: 5px; background: #fff;
+  }
+  td.saved { animation: flashOk 1s ease; }
+  td.failed { animation: flashErr 1.4s ease; }
+  @keyframes flashOk  { 0% { background: var(--ok-bg); } 100% { background: transparent; } }
+  @keyframes flashErr { 0%,60% { background: var(--err-bg); } 100% { background: transparent; } }
+  tbody td { padding: 7px 10px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+  tbody tr:hover { background: #fafbfd; }
+  .branch-row td {
+    background: #f0f4f8; font-weight: 500; color: var(--accent);
+    border-bottom: 1px solid var(--line); padding-top: 10px;
+  }
+  .branch-row .sum { font-weight: 500; color: var(--ink); }
+  .lvl, .kind { font-size: 12px; padding: 1px 7px; border-radius: 10px; white-space: nowrap; }
+  .lvl.base    { background: #eef1f5; color: var(--ink-soft); }
+  .lvl.profile { background: #e7eef7; color: var(--accent); }
+  .kind.elective_profile { background: #f0ebf7; color: #5b3a8a; }
+  .kind.elective_extra   { background: #f7f0e8; color: #8a5a2a; }
+  .flag { font-size: 12px; color: var(--warn); background: var(--warn-bg); padding: 1px 7px; border-radius: 10px; }
+
+  tfoot td {
+    padding: 12px 10px; border-top: 2px solid var(--line);
+    font-weight: 500; font-size: 15px;
+  }
+  .verdict { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 13px; margin-left: 8px; }
+  .verdict.ok  { background: var(--ok-bg); color: var(--ok); }
+  .verdict.err { background: var(--err-bg); color: var(--err); }
+
+  .loading { color: var(--ink-soft); padding: 20px 0; }
+  #screen-app { display: none; }
+  #screen-login { display: none; }
+</style>
+</head>
+<body>
+
+<!-- ============ ЕКРАН 1: налаштування підключення ============ -->
+<div id="screen-setup" class="wrap">
+  <div class="card">
+    <h2>Підключення до бази</h2>
+    <p class="hint">
+      Ці два значення візьміть у Supabase: <b>Settings → API</b>.
+      Вони залишаються лише у вашому браузері (localStorage) і нікуди не надсилаються.
+    </p>
+    <label for="cfg-url">Project URL</label>
+    <input id="cfg-url" placeholder="https://xxxx.supabase.co" autocomplete="off">
+    <label for="cfg-key">anon public key</label>
+    <input id="cfg-key" placeholder="eyJhbGciOi..." autocomplete="off">
+    <button class="primary" onclick="saveConfig()">Зберегти й підключитися</button>
+    <div id="setup-msg" class="msg"></div>
+  </div>
+</div>
+
+<!-- ============ ЕКРАН 2: вхід ============ -->
+<div id="screen-login" class="wrap">
+  <div class="card" style="max-width:420px;margin-top:40px;">
+    <h2>Вхід для адміністраторів</h2>
+    <label for="login-email">Електронна пошта</label>
+    <input id="login-email" type="email" autocomplete="username">
+    <label for="login-pass">Пароль</label>
+    <input id="login-pass" type="password" autocomplete="current-password">
+    <button class="primary" onclick="doLogin()">Увійти</button>
+    <div id="login-msg" class="msg"></div>
+    <p class="hint" style="margin-top:16px;">
+      Акаунти створюються у Supabase: <b>Authentication → Users → Add user</b>.
+    </p>
+    <p class="hint"><a href="#" onclick="resetConfig();return false;">Змінити підключення до бази</a></p>
+  </div>
+</div>
+
+<!-- ============ ЕКРАН 3: робочий ============ -->
+<div id="screen-app">
+  <header class="bar">
+    <h1>Педагогічне навантаження · пілот 10 клас</h1>
+    <div style="display:flex;align-items:center;gap:14px;">
+      <span class="who" id="who"></span>
+      <button onclick="doLogout()">Вийти</button>
+    </div>
+  </header>
+
+  <div class="wrap">
+    <div class="toolbar">
+      <div class="field">
+        <label for="sel-profile">Профіль</label>
+        <select id="sel-profile" onchange="renderPlan()"></select>
+      </div>
+    </div>
+
+    <div class="card">
+      <div id="plan-area"><div class="loading">Завантаження…</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- Бібліотека Supabase (UMD, глобальна змінна `supabase`) -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+"use strict";
+
+// ------------------------------------------------------------------
+//  СТАН ДОДАТКУ
+// ------------------------------------------------------------------
+let sb = null;            // клієнт Supabase
+let planCache = [];       // завантажені компоненти плану
+let profiles = [];        // довідник профілів
+
+// ------------------------------------------------------------------
+//  ДОПОМІЖНЕ: показ повідомлень
+// ------------------------------------------------------------------
+function showMsg(id, text, type) {
+  const el = document.getElementById(id);
+  el.textContent = text;
+  el.className = "msg " + (type || "");
+}
+function screen(name) {
+  document.getElementById("screen-setup").style.display = name === "setup" ? "block" : "none";
+  document.getElementById("screen-login").style.display = name === "login" ? "block" : "none";
+  document.getElementById("screen-app").style.display   = name === "app"   ? "block" : "none";
+}
+
+// ------------------------------------------------------------------
+//  1. КОНФІГУРАЦІЯ ПІДКЛЮЧЕННЯ (URL + anon key)
+//     Зберігаємо в localStorage — лише в цьому браузері.
+// ------------------------------------------------------------------
+function loadConfig() {
+  return {
+    url: localStorage.getItem("sb_url") || "",
+    key: localStorage.getItem("sb_key") || ""
+  };
+}
+function saveConfig() {
+  const url = document.getElementById("cfg-url").value.trim();
+  const key = document.getElementById("cfg-key").value.trim();
+  if (!url || !key) { showMsg("setup-msg", "Заповніть обидва поля.", "err"); return; }
+  if (!url.startsWith("https://")) { showMsg("setup-msg", "URL має починатися з https://", "err"); return; }
+  localStorage.setItem("sb_url", url);
+  localStorage.setItem("sb_key", key);
+  init();
+}
+function resetConfig() {
+  localStorage.removeItem("sb_url");
+  localStorage.removeItem("sb_key");
+  location.reload();
+}
+
+// ------------------------------------------------------------------
+//  2. ІНІЦІАЛІЗАЦІЯ: створюємо клієнт, перевіряємо сесію
+// ------------------------------------------------------------------
+async function init() {
+  const cfg = loadConfig();
+  if (!cfg.url || !cfg.key) { screen("setup"); return; }
+
+  // Створюємо клієнт Supabase (глобальна `supabase` з CDN)
+  sb = supabase.createClient(cfg.url, cfg.key);
+
+  // Чи вже є активна сесія (користувач заходив раніше)?
+  const { data: { session } } = await sb.auth.getSession();
+  if (session) {
+    onLoggedIn(session);
+  } else {
+    screen("login");
+  }
+}
+
+// ------------------------------------------------------------------
+//  3. ВХІД / ВИХІД
+// ------------------------------------------------------------------
+async function doLogin() {
+  const email = document.getElementById("login-email").value.trim();
+  const pass  = document.getElementById("login-pass").value;
+  if (!email || !pass) { showMsg("login-msg", "Введіть пошту й пароль.", "err"); return; }
+
+  showMsg("login-msg", "Входимо…", "");
+  const { data, error } = await sb.auth.signInWithPassword({ email, password: pass });
+  if (error) {
+    showMsg("login-msg", "Не вдалося увійти: " + error.message, "err");
+    return;
+  }
+  onLoggedIn(data.session);
+}
+
+async function doLogout() {
+  await sb.auth.signOut();
+  location.reload();
+}
+
+function onLoggedIn(session) {
+  document.getElementById("who").textContent = session.user.email;
+  screen("app");
+  loadProfiles();
+}
+
+// ------------------------------------------------------------------
+//  4. ЗАВАНТАЖЕННЯ ДАНИХ
+// ------------------------------------------------------------------
+async function loadProfiles() {
+  // Тягнемо профілі (лише пілот має profile_id у компонентах)
+  const { data, error } = await sb
+    .from("profile")
+    .select("id, code, local_name, official_name")
+    .order("id");
+  if (error) { document.getElementById("plan-area").innerHTML =
+      '<div class="msg err" style="display:block">Помилка завантаження профілів: ' + error.message + '</div>'; return; }
+
+  profiles = data;
+  const sel = document.getElementById("sel-profile");
+  sel.innerHTML = profiles.map(p => `<option value="${p.id}">${p.local_name}</option>`).join("");
+  renderPlan();
+}
+
+async function renderPlan() {
+  const area = document.getElementById("plan-area");
+  const profileId = document.getElementById("sel-profile").value;
+  if (!profileId) return;
+  area.innerHTML = '<div class="loading">Завантаження плану…</div>';
+
+  // Тягнемо компоненти обраного профілю разом із назвою галузі
+  const { data, error } = await sb
+    .from("plan_component")
+    .select("id, full_name, short_name, level, kind, hours_sem1, hours_sem2, note, branch:branch_id(code, name)")
+    .eq("profile_id", profileId)
+    .order("id");
+
+  if (error) {
+    area.innerHTML = '<div class="msg err" style="display:block">Помилка: ' + error.message + '</div>';
+    return;
+  }
+  planCache = data;
+  drawTable(data);
+}
+
+// ------------------------------------------------------------------
+//  5. МАЛЮВАННЯ ТАБЛИЦІ + ПІДРАХУНКИ (все рахується тут, у браузері)
+// ------------------------------------------------------------------
+const KIND_LABEL = {
+  mandatory: "обов'язковий",
+  elective_profile: "КВ за профілем",
+  elective_extra: "КВ поза профілем"
+};
+const LEVEL_LABEL = { base: "базовий", profile: "профільний", deepened: "поглиблений" };
+const NORM = 36; // норма годин на тиждень (наказ №765), кожен семестр
+
+function drawTable(rows) {
+  // Групуємо за галуззю, зберігаючи порядок появи
+  const groups = [];
+  const idx = {};
+  for (const r of rows) {
+    const code = r.branch.code;
+    if (!(code in idx)) { idx[code] = groups.length; groups.push({ name: r.branch.name, items: [] }); }
+    groups[idx[code]].items.push(r);
+  }
+
+  let totS1 = 0, totS2 = 0;
+  let html = `<table>
+    <thead><tr>
+      <th>Освітній компонент</th>
+      <th>Рівень</th>
+      <th>Тип</th>
+      <th class="num">I сем.</th>
+      <th class="num">II сем.</th>
+    </tr></thead><tbody>`;
+
+  for (const g of groups) {
+    let gS1 = 0, gS2 = 0;
+    for (const it of g.items) { gS1 += Number(it.hours_sem1) || 0; gS2 += Number(it.hours_sem2) || 0; }
+    totS1 += gS1; totS2 += gS2;
+
+    html += `<tr class="branch-row">
+      <td colspan="3">${g.name}</td>
+      <td class="num sum">${fmt(gS1)}</td>
+      <td class="num sum">${fmt(gS2)}</td>
+    </tr>`;
+
+    for (const it of g.items) {
+      const flag = it.note ? `<span class="flag" title="${esc(it.note)}">⚑ звірити</span>` : "";
+      html += `<tr>
+        <td>${esc(it.full_name)} ${flag}<br><span class="hint">${esc(it.short_name || "")}</span></td>
+        <td><span class="lvl ${it.level}">${LEVEL_LABEL[it.level] || it.level}</span></td>
+        <td><span class="kind ${it.kind}">${KIND_LABEL[it.kind] || it.kind}</span></td>
+        <td class="num edit" data-id="${it.id}" data-field="hours_sem1" onclick="startEdit(this)">${fmt(it.hours_sem1)}</td>
+        <td class="num edit" data-id="${it.id}" data-field="hours_sem2" onclick="startEdit(this)">${fmt(it.hours_sem2)}</td>
+      </tr>`;
+    }
+  }
+
+  // Підсумок + звірка з нормою
+  const v1 = verdict(totS1), v2 = verdict(totS2);
+  html += `</tbody><tfoot><tr>
+    <td colspan="3">Разом (тиждень)</td>
+    <td class="num">${fmt(totS1)}${v1}</td>
+    <td class="num">${fmt(totS2)}${v2}</td>
+  </tr></tfoot></table>
+  <p class="hint" style="margin-top:14px;">
+    Норма за наказом №765 — ${NORM} год/тиждень у кожному семестрі.
+    ⚑ — компоненти, які варто звірити з друкованим планом.
+  </p>`;
+
+  document.getElementById("plan-area").innerHTML = html;
+}
+
+function verdict(sum) {
+  const s = Number(sum.toFixed(1));
+  if (s === NORM) return `<span class="verdict ok">= ${NORM} ✓</span>`;
+  const diff = (s - NORM).toFixed(1);
+  const sign = diff > 0 ? "+" : "";
+  return `<span class="verdict err">${sign}${diff}</span>`;
+}
+
+// Форматування числа: 3 замість 3.0, але 3.5 лишається
+function fmt(n) {
+  const x = Number(n) || 0;
+  return Number.isInteger(x) ? String(x) : x.toFixed(1);
+}
+function esc(s) {
+  return String(s || "").replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
+}
+
+// ------------------------------------------------------------------
+//  6. РЕДАГУВАННЯ ГОДИН (клац по клітинці → правка → збереження одразу)
+// ------------------------------------------------------------------
+let editing = false; // щоб не відкрити два поля водночас
+
+function startEdit(td) {
+  if (editing) return;
+  editing = true;
+
+  const oldText = td.textContent.trim();
+  const oldVal = Number(oldText) || 0;
+
+  // Замінюємо вміст клітинки на поле вводу
+  td.innerHTML = `<input type="text" inputmode="decimal" value="${oldText}">`;
+  const input = td.querySelector("input");
+  input.focus();
+  input.select();
+
+  let done = false; // захист від подвійного спрацювання (blur + Enter)
+
+  function finish(save) {
+    if (done) return;
+    done = true;
+    editing = false;
+
+    const raw = input.value.trim().replace(",", "."); // приймаємо і кому, і крапку
+    const newVal = Number(raw);
+
+    // Валідація: число, не відʼємне, крок 0.5
+    const valid = raw !== "" && !isNaN(newVal) && newVal >= 0 && (newVal * 2) % 1 === 0;
+
+    if (!save || !valid || newVal === oldVal) {
+      // Скасування або без змін — просто повертаємо старе значення
+      td.textContent = fmt(oldVal);
+      if (save && !valid) flash(td, "failed");
+      return;
+    }
+    saveCell(td, newVal, oldVal);
+  }
+
+  input.addEventListener("blur", () => finish(true));
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); input.blur(); }
+    else if (e.key === "Escape") { finish(false); }
+  });
+}
+
+async function saveCell(td, newVal, oldVal) {
+  const id = td.dataset.id;
+  const field = td.dataset.field;
+
+  td.textContent = fmt(newVal); // показуємо одразу (оптимістично)
+
+  const { error } = await sb
+    .from("plan_component")
+    .update({ [field]: newVal })
+    .eq("id", id);
+
+  if (error) {
+    // Відкат при помилці
+    td.textContent = fmt(oldVal);
+    flash(td, "failed");
+    alert("Не вдалося зберегти: " + error.message);
+    return;
+  }
+
+  // Оновлюємо кеш і перераховуємо суми/звірку без повного перезавантаження
+  const row = planCache.find(r => String(r.id) === String(id));
+  if (row) row[field] = newVal;
+  recomputeTotals();
+  flash(td, "saved");
+}
+
+function flash(td, cls) {
+  td.classList.remove("saved", "failed");
+  void td.offsetWidth;      // рестарт анімації
+  td.classList.add(cls);
+}
+
+// Перерахунок підсумків по галузях і загального рядка (без перемальовування всієї таблиці)
+function recomputeTotals() {
+  const table = document.querySelector("#plan-area table");
+  if (!table) return;
+  drawTable(planCache); // найпростіше й надійно: перемалювати з оновленого кешу
+}
+
+// ------------------------------------------------------------------
+//  СТАРТ
+// ------------------------------------------------------------------
+// Підставляємо збережену конфігурацію в поля (якщо була)
+(function () {
+  const cfg = loadConfig();
+  if (cfg.url) document.getElementById("cfg-url").value = cfg.url;
+  if (cfg.key) document.getElementById("cfg-key").value = cfg.key;
+  init();
+})();
+</script>
+</body>
+</html>
