@@ -95,6 +95,42 @@
   .toolbar .field { flex: 1; min-width: 220px; }
   .toolbar label { margin-top: 0; }
 
+  /* Вкладки розділів */
+  .tabs { display: flex; gap: 4px; border-bottom: 2px solid var(--line); margin-bottom: 20px; }
+  .tabs button {
+    background: none; border: none; padding: 10px 18px; font-size: 15px; cursor: pointer;
+    color: var(--ink-soft); border-bottom: 2px solid transparent; margin-bottom: -2px;
+    font-family: inherit;
+  }
+  .tabs button:hover { color: var(--ink); }
+  .tabs button.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 500; }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  /* Список вчителів */
+  .teacher-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; }
+  .teacher-item {
+    display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+    border: 1px solid var(--line); border-radius: 6px; background: var(--paper);
+  }
+  .teacher-item .name { flex: 1; font-size: 14px; }
+  .teacher-item input { padding: 5px 8px; font-size: 14px; }
+  .icon-btn {
+    background: none; border: 1px solid var(--line); border-radius: 5px; cursor: pointer;
+    padding: 4px 9px; font-size: 13px; color: var(--ink-soft);
+  }
+  .icon-btn:hover { background: var(--field); color: var(--ink); }
+
+  /* Групи-потоки */
+  .group-card { border: 1px solid var(--line); border-radius: 8px; padding: 14px; margin-bottom: 12px; }
+  .group-card h3 { margin: 0 0 8px; font-size: 15px; font-weight: 500; }
+  .badge-kind { font-size: 12px; padding: 2px 8px; border-radius: 10px; background: #e7eef7; color: var(--accent); }
+  .cons-ok  { color: var(--ok); background: var(--ok-bg); padding: 2px 10px; border-radius: 10px; font-size: 13px; }
+  .cons-err { color: var(--err); background: var(--err-bg); padding: 2px 10px; border-radius: 10px; font-size: 13px; }
+  .cover-item { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 14px; }
+  .cover-item label { margin: 0; display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  .cover-item .hrs { color: var(--ink-soft); font-size: 13px; }
+
   /* Таблиця плану */
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
   thead th {
@@ -189,15 +225,45 @@
   </header>
 
   <div class="wrap">
-    <div class="toolbar">
-      <div class="field">
-        <label for="sel-profile">Профіль</label>
-        <select id="sel-profile" onchange="renderPlan()"></select>
+    <!-- Перемикач розділів -->
+    <div class="tabs">
+      <button id="tab-plans" class="active" onclick="switchTab('plans')">Плани</button>
+      <button id="tab-load" onclick="switchTab('load')">Навантаження</button>
+    </div>
+
+    <!-- РОЗДІЛ 1: Плани -->
+    <div id="panel-plans" class="tab-panel active">
+      <div class="toolbar">
+        <div class="field">
+          <label for="sel-profile">Профіль</label>
+          <select id="sel-profile" onchange="renderPlan()"></select>
+        </div>
+      </div>
+      <div class="card">
+        <div id="plan-area"><div class="loading">Завантаження…</div></div>
       </div>
     </div>
 
-    <div class="card">
-      <div id="plan-area"><div class="loading">Завантаження…</div></div>
+    <!-- РОЗДІЛ 2: Навантаження -->
+    <div id="panel-load" class="tab-panel">
+      <!-- Вчителі -->
+      <div class="card">
+        <h2>Вчителі</h2>
+        <p class="hint">Клік «✎» — редагувати ПІБ (напр. дописати повне імʼя). Enter — зберегти.</p>
+        <div id="teacher-list" class="teacher-list"><div class="loading">Завантаження…</div></div>
+      </div>
+
+      <!-- Фактичні групи (потоки) -->
+      <div class="card">
+        <h2>Фактичні групи (потоки)</h2>
+        <p class="hint">
+          Група зводить кілька компонентів різних профілів. Програма перевіряє,
+          чи однакові в них години — інакше потік обʼєднувати не можна.
+        </p>
+        <button class="primary" onclick="openNewGroup()">+ Нова група</button>
+        <div id="group-editor"></div>
+        <div id="group-list" style="margin-top:18px;"><div class="loading">Завантаження…</div></div>
+      </div>
     </div>
   </div>
 </div>
@@ -509,6 +575,250 @@ function recomputeTotals() {
   const table = document.querySelector("#plan-area table");
   if (!table) return;
   drawTable(planCache); // найпростіше й надійно: перемалювати з оновленого кешу
+}
+
+// ------------------------------------------------------------------
+//  7. ВКЛАДКИ (перемикання розділів)
+// ------------------------------------------------------------------
+let loadTabInited = false;
+
+function switchTab(name) {
+  document.getElementById("tab-plans").classList.toggle("active", name === "plans");
+  document.getElementById("tab-load").classList.toggle("active", name === "load");
+  document.getElementById("panel-plans").classList.toggle("active", name === "plans");
+  document.getElementById("panel-load").classList.toggle("active", name === "load");
+
+  // Дані розділу «Навантаження» вантажимо при першому відкритті
+  if (name === "load" && !loadTabInited) {
+    loadTabInited = true;
+    loadTeachers();
+    loadGroups();
+  }
+}
+
+// ------------------------------------------------------------------
+//  8. ВЧИТЕЛІ (список + редагування ПІБ)
+// ------------------------------------------------------------------
+let teachersCache = [];
+
+async function loadTeachers() {
+  const box = document.getElementById("teacher-list");
+  const { data, error } = await sb.from("teacher").select("id, full_name").order("full_name");
+  if (error) { box.innerHTML = `<div class="msg err" style="display:block">${error.message}</div>`; return; }
+  teachersCache = data;
+  drawTeachers();
+}
+
+function drawTeachers() {
+  const box = document.getElementById("teacher-list");
+  box.innerHTML = teachersCache.map(t => `
+    <div class="teacher-item" data-id="${t.id}">
+      <span class="name">${esc(t.full_name)}</span>
+      <button class="icon-btn" onclick="editTeacher(${t.id})" title="Редагувати">✎</button>
+    </div>`).join("");
+}
+
+function editTeacher(id) {
+  const item = document.querySelector(`.teacher-item[data-id="${id}"]`);
+  const t = teachersCache.find(x => x.id === id);
+  item.innerHTML = `
+    <input type="text" value="${esc(t.full_name)}" style="flex:1">
+    <button class="icon-btn" title="Зберегти">✓</button>`;
+  const input = item.querySelector("input");
+  const btn = item.querySelector("button");
+  input.focus(); input.select();
+
+  let done = false;
+  async function save(commit) {
+    if (done) return; done = true;
+    const val = input.value.trim();
+    if (commit && val && val !== t.full_name) {
+      const { error } = await sb.from("teacher").update({ full_name: val }).eq("id", id);
+      if (error) { alert("Помилка: " + error.message); }
+      else { t.full_name = val; }
+    }
+    drawTeachers();
+  }
+  btn.onclick = () => save(true);
+  input.addEventListener("blur", () => save(true));
+  input.addEventListener("keydown", e => {
+    if (e.key === "Enter") { e.preventDefault(); save(true); }
+    else if (e.key === "Escape") { save(false); }
+  });
+}
+
+// ------------------------------------------------------------------
+//  9. ФАКТИЧНІ ГРУПИ (потоки) + перевірка узгодженості
+// ------------------------------------------------------------------
+let groupsCache = [];
+const KIND_GROUP = {
+  stream: "потік", half_stream: "півпотік", profile: "профільна", subgroup: "підгрупа"
+};
+
+async function loadGroups() {
+  const box = document.getElementById("group-list");
+  // Тягнемо групи разом із покриттям і годинами компонентів
+  const { data, error } = await sb
+    .from("teaching_group")
+    .select(`id, label, kind, note,
+             group_coverage ( id, component_id,
+               plan_component ( id, full_name, hours_sem1, hours_sem2,
+                 profile:profile_id ( local_name ) ) )`)
+    .order("id");
+  if (error) { box.innerHTML = `<div class="msg err" style="display:block">${error.message}</div>`; return; }
+  groupsCache = data;
+  drawGroups();
+}
+
+function drawGroups() {
+  const box = document.getElementById("group-list");
+  if (!groupsCache.length) { box.innerHTML = `<p class="hint">Ще немає груп. Створіть першу кнопкою вище.</p>`; return; }
+
+  box.innerHTML = groupsCache.map(g => {
+    const cov = g.group_coverage || [];
+    const comps = cov.map(c => c.plan_component).filter(Boolean);
+    // Перевірка узгодженості (та сама логіка, що у v_group_consistency)
+    const s1 = new Set(comps.map(c => Number(c.hours_sem1)));
+    const s2 = new Set(comps.map(c => Number(c.hours_sem2)));
+    const consistent = s1.size <= 1 && s2.size <= 1;
+    const cons = comps.length === 0
+      ? `<span class="hint">без покриття</span>`
+      : consistent
+        ? `<span class="cons-ok">узгоджено ✓ ${fmt([...s1][0]||0)}/${fmt([...s2][0]||0)}</span>`
+        : `<span class="cons-err">розбіжність годин ✗</span>`;
+
+    const list = comps.map(c =>
+      `<div class="cover-item"><span>${esc(c.profile?.local_name || "—")}: ${esc(c.full_name)}</span>
+       <span class="hrs">${fmt(c.hours_sem1)}/${fmt(c.hours_sem2)}</span></div>`).join("");
+
+    return `<div class="group-card">
+      <h3>${esc(g.label)} <span class="badge-kind">${KIND_GROUP[g.kind] || g.kind}</span> ${cons}</h3>
+      ${list || '<p class="hint">Компоненти не додані.</p>'}
+      <div style="margin-top:8px;">
+        <button class="icon-btn" onclick="editGroupCoverage(${g.id})">Змінити покриття</button>
+        <button class="icon-btn" onclick="deleteGroup(${g.id})">Видалити</button>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+// --- Створення нової групи ---
+function openNewGroup() {
+  const ed = document.getElementById("group-editor");
+  ed.innerHTML = `
+    <div class="group-card" style="margin-top:14px;background:#fafbfd;">
+      <h3>Нова група</h3>
+      <label>Назва</label>
+      <input id="ng-label" placeholder="напр. Потік літератур 10">
+      <label>Тип</label>
+      <select id="ng-kind">
+        <option value="stream">потік (кілька профілів)</option>
+        <option value="half_stream">півпотік</option>
+        <option value="profile">профільна (один профіль)</option>
+        <option value="subgroup">підгрупа</option>
+      </select>
+      <button class="primary" onclick="createGroup()">Створити</button>
+      <button class="icon-btn" onclick="document.getElementById('group-editor').innerHTML=''">Скасувати</button>
+    </div>`;
+}
+
+async function createGroup() {
+  const label = document.getElementById("ng-label").value.trim();
+  const kind = document.getElementById("ng-kind").value;
+  if (!label) { alert("Введіть назву групи."); return; }
+  const yearId = await currentYearId();
+  const { data, error } = await sb.from("teaching_group")
+    .insert({ label, kind, year_id: yearId }).select().single();
+  if (error) { alert("Помилка: " + error.message); return; }
+  document.getElementById("group-editor").innerHTML = "";
+  await loadGroups();
+  editGroupCoverage(data.id); // одразу пропонуємо додати покриття
+}
+
+async function deleteGroup(id) {
+  if (!confirm("Видалити групу разом із її покриттям?")) return;
+  // Спершу прибираємо покриття (on delete cascade це зробить, але для певності)
+  await sb.from("teaching_group").delete().eq("id", id);
+  await loadGroups();
+}
+
+// --- Редагування покриття (які компоненти зводить група) ---
+async function editGroupCoverage(groupId) {
+  const ed = document.getElementById("group-editor");
+  ed.innerHTML = `<div class="group-card" style="margin-top:14px;background:#fafbfd;"><div class="loading">Завантаження компонентів…</div></div>`;
+
+  // Тягнемо всі компоненти пілоту з профілем і годинами
+  const { data: comps, error } = await sb
+    .from("plan_component")
+    .select("id, full_name, hours_sem1, hours_sem2, profile:profile_id(local_name, code)")
+    .not("profile_id", "is", null)
+    .order("full_name");
+  if (error) { ed.innerHTML = `<div class="msg err" style="display:block">${error.message}</div>`; return; }
+
+  // Поточне покриття цієї групи
+  const grp = groupsCache.find(g => g.id === groupId);
+  const covered = new Set((grp?.group_coverage || []).map(c => c.component_id));
+
+  const rows = comps.map(c => `
+    <div class="cover-item">
+      <label>
+        <input type="checkbox" value="${c.id}" ${covered.has(c.id) ? "checked" : ""}
+               onchange="previewConsistency()">
+        <span>${esc(c.profile?.local_name || "—")}: ${esc(c.full_name)}</span>
+      </label>
+      <span class="hrs" data-s1="${c.hours_sem1}" data-s2="${c.hours_sem2}">${fmt(c.hours_sem1)}/${fmt(c.hours_sem2)}</span>
+    </div>`).join("");
+
+  ed.innerHTML = `
+    <div class="group-card" style="margin-top:14px;background:#fafbfd;">
+      <h3>Покриття: ${esc(grp?.label || "")} <span id="prev-cons"></span></h3>
+      <p class="hint">Позначте компоненти, які ця група зводить. Перевірка узгодженості — наживо.</p>
+      <div id="cover-rows" style="max-height:320px;overflow:auto;">${rows}</div>
+      <div style="margin-top:10px;">
+        <button class="primary" onclick="saveCoverage(${groupId})">Зберегти покриття</button>
+        <button class="icon-btn" onclick="document.getElementById('group-editor').innerHTML=''">Закрити</button>
+      </div>
+    </div>`;
+  previewConsistency();
+}
+
+// Жива перевірка узгодженості під час вибору галочок
+function previewConsistency() {
+  const checks = [...document.querySelectorAll("#cover-rows input:checked")];
+  const el = document.getElementById("prev-cons");
+  if (checks.length === 0) { el.innerHTML = `<span class="hint">нічого не вибрано</span>`; return; }
+  const s1 = new Set(), s2 = new Set();
+  checks.forEach(ch => {
+    const hrs = ch.closest(".cover-item").querySelector(".hrs");
+    s1.add(Number(hrs.dataset.s1)); s2.add(Number(hrs.dataset.s2));
+  });
+  const ok = s1.size <= 1 && s2.size <= 1;
+  el.innerHTML = ok
+    ? `<span class="cons-ok">узгоджено ✓ ${fmt([...s1][0])}/${fmt([...s2][0])}</span>`
+    : `<span class="cons-err">розбіжність годин ✗ (${[...s1].map(fmt).join("/")} · ${[...s2].map(fmt).join("/")})</span>`;
+}
+
+async function saveCoverage(groupId) {
+  const checks = [...document.querySelectorAll("#cover-rows input:checked")].map(c => Number(c.value));
+  // Простий підхід: прибрати старе покриття, вставити нове
+  const { error: delErr } = await sb.from("group_coverage").delete().eq("group_id", groupId);
+  if (delErr) { alert("Помилка очищення: " + delErr.message); return; }
+  if (checks.length) {
+    const rows = checks.map(cid => ({ group_id: groupId, component_id: cid }));
+    const { error: insErr } = await sb.from("group_coverage").insert(rows);
+    if (insErr) { alert("Помилка збереження: " + insErr.message); return; }
+  }
+  document.getElementById("group-editor").innerHTML = "";
+  await loadGroups();
+}
+
+// Допоміжне: id поточного навчального року
+let _yearId = null;
+async function currentYearId() {
+  if (_yearId) return _yearId;
+  const { data } = await sb.from("academic_year").select("id").eq("is_current", true).single();
+  _yearId = data?.id;
+  return _yearId;
 }
 
 // ------------------------------------------------------------------
