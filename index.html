@@ -3,21 +3,21 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Навантаження — Коломийський ліцей ім. М. Грушевського</title>
+<title>Навантаження і тарифікація</title>
 
 <!--
   РЕДАКТОР ПЕДАГОГІЧНОГО НАВАНТАЖЕННЯ
   ------------------------------------------------------------------
   Один HTML-файл. Працює прямо в браузері, спілкується з Supabase.
-  Версія 1: вхід + перегляд навчальних планів пілоту з підрахунком сум.
+  Версія 3: вхід + плани + навантаження + ТАРИФІКАЦІЯ (форма за наказом МО №102 від 15.04.1993).
 
   СТРУКТУРА ФАЙЛУ (згори вниз):
     1. <style>   — оформлення
     2. HTML      — три екрани: налаштування / вхід / робочий
-    3. <script>  — логіка: підключення, вхід, завантаження даних, малювання таблиці
+    3. <script>  — логіка: підключення, вхід, завантаження, малювання, редагування
 
-  Редагувати години будемо в наступній версії — спершу переконаємось,
-  що читання й підрахунки правильні на реальних даних.
+  Редагування: клац по клітинці годин → правка → вихід (Enter/Tab/клік поза) →
+  якщо значення змінилось, летить update у Supabase; суми перераховуються.
 -->
 
 <style>
@@ -95,6 +95,42 @@
   .toolbar .field { flex: 1; min-width: 220px; }
   .toolbar label { margin-top: 0; }
 
+  /* Вкладки розділів */
+  .tabs { display: flex; gap: 4px; border-bottom: 2px solid var(--line); margin-bottom: 20px; }
+  .tabs button {
+    background: none; border: none; padding: 10px 18px; font-size: 15px; cursor: pointer;
+    color: var(--ink-soft); border-bottom: 2px solid transparent; margin-bottom: -2px;
+    font-family: inherit;
+  }
+  .tabs button:hover { color: var(--ink); }
+  .tabs button.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 500; }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  /* Список вчителів */
+  .teacher-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; }
+  .teacher-item {
+    display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+    border: 1px solid var(--line); border-radius: 6px; background: var(--paper);
+  }
+  .teacher-item .name { flex: 1; font-size: 14px; }
+  .teacher-item input { padding: 5px 8px; font-size: 14px; }
+  .icon-btn {
+    background: none; border: 1px solid var(--line); border-radius: 5px; cursor: pointer;
+    padding: 4px 9px; font-size: 13px; color: var(--ink-soft);
+  }
+  .icon-btn:hover { background: var(--field); color: var(--ink); }
+
+  /* Групи-потоки */
+  .group-card { border: 1px solid var(--line); border-radius: 8px; padding: 14px; margin-bottom: 12px; }
+  .group-card h3 { margin: 0 0 8px; font-size: 15px; font-weight: 500; }
+  .badge-kind { font-size: 12px; padding: 2px 8px; border-radius: 10px; background: #e7eef7; color: var(--accent); }
+  .cons-ok  { color: var(--ok); background: var(--ok-bg); padding: 2px 10px; border-radius: 10px; font-size: 13px; }
+  .cons-err { color: var(--err); background: var(--err-bg); padding: 2px 10px; border-radius: 10px; font-size: 13px; }
+  .cover-item { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 14px; }
+  .cover-item label { margin: 0; display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  .cover-item .hrs { color: var(--ink-soft); font-size: 13px; }
+
   /* Таблиця плану */
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
   thead th {
@@ -102,6 +138,19 @@
     border-bottom: 2px solid var(--line); padding: 8px 10px; font-size: 13px;
   }
   th.num, td.num { text-align: center; width: 62px; }
+
+  /* Редаговані клітинки годин */
+  td.edit { cursor: pointer; border-radius: 5px; }
+  td.edit:hover { background: #eef4fb; box-shadow: inset 0 0 0 1px var(--line); }
+  td.edit:focus-within { background: #fff; }
+  td.edit input {
+    width: 48px; padding: 3px 4px; text-align: center; font-size: 14px;
+    border: 1px solid var(--accent); border-radius: 5px; background: #fff;
+  }
+  td.saved { animation: flashOk 1s ease; }
+  td.failed { animation: flashErr 1.4s ease; }
+  @keyframes flashOk  { 0% { background: var(--ok-bg); } 100% { background: transparent; } }
+  @keyframes flashErr { 0%,60% { background: var(--err-bg); } 100% { background: transparent; } }
   tbody td { padding: 7px 10px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
   tbody tr:hover { background: #fafbfd; }
   .branch-row td {
@@ -127,6 +176,100 @@
   .loading { color: var(--ink-soft); padding: 20px 0; }
   #screen-app { display: none; }
   #screen-login { display: none; }
+
+  /* ================= ТАРИФІКАЦІЯ ================= */
+  .subtabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 16px; }
+  .subtabs button {
+    background: var(--paper); border: 1px solid var(--line); border-radius: 16px;
+    padding: 5px 14px; font-size: 14px; cursor: pointer; color: var(--ink-soft); font-family: inherit;
+  }
+  .subtabs button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .stepper { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; margin-bottom: 10px; }
+  @media (max-width: 900px) { .stepper { grid-template-columns: repeat(3, 1fr); } }
+  .stepper button {
+    display: flex; align-items: center; gap: 8px; text-align: left; position: relative;
+    background: var(--paper); border: 1px solid var(--line); border-radius: 8px;
+    padding: 8px 10px; cursor: pointer; font-family: inherit; color: var(--ink);
+  }
+  .stepper button:hover { border-color: var(--accent); }
+  .stepper button.active { border-color: var(--accent); box-shadow: inset 0 -3px 0 var(--accent); }
+  .st-no {
+    flex: 0 0 26px; height: 26px; border-radius: 50%; background: var(--line-soft);
+    display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 500;
+  }
+  .stepper button.active .st-no { background: var(--accent); color: #fff; }
+  .st-tx { font-size: 14px; line-height: 1.2; flex: 1; }
+  .st-tx small { display: block; font-size: 11px; color: var(--ink-soft); }
+  .st-badge { font-size: 11px; border-radius: 10px; padding: 1px 7px; white-space: nowrap; }
+  .st-badge.ok   { background: var(--ok-bg); color: var(--ok); }
+  .st-badge.warn { background: var(--warn-bg); color: var(--warn); }
+  .st-badge.err  { background: var(--err-bg); color: var(--err); }
+  .step-nav { display: flex; justify-content: space-between; margin-top: 4px; }
+  .q { display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px;
+       border-radius: 50%; background: #e7eef7; color: var(--accent); font-size: 10px; font-weight: 600;
+       cursor: help; margin-left: 3px; vertical-align: 1px; }
+  .issue { display: grid; grid-template-columns: 22px 1fr auto; gap: 8px; align-items: start;
+           padding: 8px 10px; border-bottom: 1px solid var(--line-soft); font-size: 14px; }
+  .issue .ic { font-weight: 700; text-align: center; }
+  .issue.err .ic { color: var(--err); } .issue.warn .ic { color: var(--warn); }
+  .help h3 { font-size: 15px; font-weight: 500; margin: 18px 0 6px; color: var(--accent); }
+  .help p, .help li { font-size: 14px; }
+  .help ol, .help ul { padding-left: 22px; }
+  .stat-row { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 16px; }
+  .stat { background: var(--field); border-radius: 8px; padding: 10px 14px; min-width: 150px; }
+  .stat b { display: block; font-size: 18px; font-weight: 500; }
+  .stat span { font-size: 12px; color: var(--ink-soft); }
+  .sub-panel { display: none; }
+  .sub-panel.active { display: block; }
+
+  .grid2 { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 0 16px; }
+  .badge { font-size: 12px; padding: 2px 10px; border-radius: 10px; white-space: nowrap; }
+  .badge.draft { background: var(--warn-bg); color: var(--warn); }
+  .badge.approved { background: var(--ok-bg); color: var(--ok); }
+  .badge.role { background: #e7eef7; color: var(--accent); }
+
+  /* Компактні поля в таблицях тарифікації */
+  table.tt { font-size: 13px; }
+  table.tt th { font-size: 12px; padding: 6px; vertical-align: bottom; }
+  table.tt td { padding: 4px 6px; vertical-align: middle; }
+  table.tt input, table.tt select {
+    padding: 4px 6px; font-size: 13px; border-radius: 5px; width: 100%; min-width: 0;
+  }
+  table.tt input.n { width: 72px; text-align: right; }
+  table.tt input.n-s { width: 56px; text-align: right; }
+  table.tt td:has(> input.n-s) { white-space: nowrap; }
+  input:disabled, select:disabled { background: transparent; border-color: transparent; color: var(--ink); }
+  td.calc { text-align: right; color: var(--ink-soft); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  td.calc b { color: var(--ink); font-weight: 500; }
+  .zone-fin { background: #fbf8ef; }          /* зона бухгалтера */
+  th.zone-fin { color: var(--warn); }
+  .saved-ok { animation: flashOk 1s ease; }
+  .saved-err { animation: flashErr 1.4s ease; }
+
+  .entry-list { max-height: 640px; overflow: auto; }
+  .entry-item {
+    display: grid; grid-template-columns: 34px 1fr auto; gap: 8px; align-items: center;
+    padding: 7px 10px; border-bottom: 1px solid var(--line-soft); cursor: pointer; font-size: 14px;
+  }
+  .entry-item:hover { background: #f5f8fc; }
+  .entry-item.sel { background: #e7eef7; }
+  .entry-item .no { color: var(--ink-soft); text-align: right; }
+  .entry-item .meta { font-size: 12px; color: var(--ink-soft); }
+  .entry-layout { display: grid; grid-template-columns: 300px 1fr; gap: 16px; align-items: start; }
+    .entry-layout > * { min-width: 0; }
+  @media (max-width: 900px) { .entry-layout { grid-template-columns: 1fr; } }
+
+  .raise-chip {
+    display: inline-flex; align-items: center; gap: 4px; margin: 2px 4px 2px 0;
+    background: #eef1f5; border-radius: 12px; padding: 1px 4px 1px 8px; font-size: 12px;
+  }
+  .raise-chip input { width: 46px !important; padding: 1px 4px !important; font-size: 12px !important; }
+  .x-btn { background: none; border: none; color: var(--ink-soft); cursor: pointer; font-size: 14px; padding: 0 4px; }
+  .x-btn:hover { color: var(--err); }
+  .sec-title { font-size: 14px; font-weight: 500; margin: 18px 0 6px; color: var(--accent); }
+  .totals-row { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; margin-top: 10px; }
+  .totals-row span b { font-weight: 500; }
+  .edu-box { margin: 6px 0 4px 0; padding: 8px 10px; background: var(--field); border-radius: 6px; }
 </style>
 </head>
 <body>
@@ -168,7 +311,7 @@
 <!-- ============ ЕКРАН 3: робочий ============ -->
 <div id="screen-app">
   <header class="bar">
-    <h1>Педагогічне навантаження · пілот 10 клас</h1>
+    <h1>Навантаження і тарифікація</h1>
     <div style="display:flex;align-items:center;gap:14px;">
       <span class="who" id="who"></span>
       <button onclick="doLogout()">Вийти</button>
@@ -176,21 +319,109 @@
   </header>
 
   <div class="wrap">
-    <div class="toolbar">
-      <div class="field">
-        <label for="sel-profile">Профіль</label>
-        <select id="sel-profile" onchange="renderPlan()"></select>
+    <!-- Перемикач розділів -->
+    <div class="tabs">
+      <button id="tab-plans" class="active" onclick="switchTab('plans')">Плани</button>
+      <button id="tab-load" onclick="switchTab('load')">Навантаження</button>
+      <button id="tab-tariff" onclick="switchTab('tariff')">Тарифікація</button>
+    </div>
+
+    <!-- РОЗДІЛ 1: Плани -->
+    <div id="panel-plans" class="tab-panel active">
+      <div class="toolbar">
+        <div class="field">
+          <label for="sel-profile">Профіль</label>
+          <select id="sel-profile" onchange="renderPlan()"></select>
+        </div>
+      </div>
+      <div class="card">
+        <div id="plan-area"><div class="loading">Завантаження…</div></div>
       </div>
     </div>
 
-    <div class="card">
-      <div id="plan-area"><div class="loading">Завантаження…</div></div>
+    <!-- РОЗДІЛ 2: Навантаження -->
+    <div id="panel-load" class="tab-panel">
+      <!-- Вчителі -->
+      <div class="card">
+        <h2>Вчителі</h2>
+        <p class="hint">Клік «✎» — редагувати ПІБ (напр. дописати повне імʼя). Enter — зберегти.</p>
+        <div id="teacher-list" class="teacher-list"><div class="loading">Завантаження…</div></div>
+      </div>
+
+      <!-- Фактичні групи (потоки) -->
+      <div class="card">
+        <h2>Фактичні групи (потоки)</h2>
+        <p class="hint">
+          Група зводить кілька компонентів різних профілів. Програма перевіряє,
+          чи однакові в них години — інакше потік обʼєднувати не можна.
+        </p>
+        <button class="primary" onclick="openNewGroup()">+ Нова група</button>
+        <div id="group-editor"></div>
+        <div id="group-list" style="margin-top:18px;"><div class="loading">Завантаження…</div></div>
+      </div>
+    </div>
+
+    <!-- РОЗДІЛ 3: Тарифікація -->
+    <div id="panel-tariff" class="tab-panel">
+      <div class="toolbar">
+        <div class="field">
+          <label for="sel-period">Тарифікація станом на</label>
+          <select id="sel-period" onchange="selectPeriod(this.value)"></select>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;padding-bottom:6px;">
+          <span id="period-status"></span>
+          <span id="role-badge" class="badge role"></span>
+        </div>
+        <button class="icon-btn" id="btn-export" onclick="exportTariffXlsx()" style="margin-bottom:6px;">⬇ Excel за формою</button>
+        <button class="icon-btn" id="btn-new-period" onclick="openNewPeriod()" style="margin-bottom:6px;">+ Нова тарифікація</button>
+      </div>
+      <div id="new-period-box"></div>
+
+      <!-- Покроковий майстер: кожен крок — одна частина форми -->
+      <div class="stepper" id="tariff-steps">
+        <button data-sub="req" class="active" onclick="switchSub('req')"><span class="st-no">1</span><span class="st-tx">Реквізити<small>титульна частина</small></span><span class="st-badge" id="sb-req"></span></button>
+        <button data-sub="ind" onclick="switchSub('ind')"><span class="st-no">2</span><span class="st-tx">Показники<small>класи, учні, години</small></span><span class="st-badge" id="sb-ind"></span></button>
+        <button data-sub="ent" onclick="switchSub('ent')"><span class="st-no">3</span><span class="st-tx">Працівники<small>посади, години, доплати</small></span><span class="st-badge" id="sb-ent"></span></button>
+        <button data-sub="fin" onclick="switchSub('fin')"><span class="st-no">4</span><span class="st-tx">Ставки й суми<small>заповнює бухгалтер</small></span><span class="st-badge" id="sb-fin"></span></button>
+        <button data-sub="chk" onclick="switchSub('chk')"><span class="st-no">5</span><span class="st-tx">Перевірка<small>помилки й попередження</small></span><span class="st-badge" id="sb-chk"></span></button>
+        <button data-sub="exp" onclick="switchSub('exp')"><span class="st-no">6</span><span class="st-tx">Excel<small>А3, альбомна</small></span><span class="st-badge" id="sb-exp"></span></button>
+      </div>
+      <div class="subtabs" id="tariff-subtabs">
+        <button data-sub="reg" onclick="switchSub('reg')">Реєстр працівників</button>
+        <button data-sub="cfg" onclick="switchSub('cfg')">⚙ Налаштування форми</button>
+        <button data-sub="help" onclick="switchSub('help')">? Як працювати</button>
+      </div>
+
+      <div id="sub-req" class="sub-panel active"><div class="card" id="req-area"></div></div>
+      <div id="sub-ind" class="sub-panel"><div class="card" id="ind-area"></div></div>
+      <div id="sub-ent" class="sub-panel">
+        <div class="entry-layout">
+          <div class="card" style="padding:12px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+              <h2 style="margin:0;">Список</h2>
+              <button class="icon-btn" id="btn-add-entry" onclick="openAddEntry()">+ Додати</button>
+            </div>
+            <div id="add-entry-box"></div>
+            <div id="entry-list" class="entry-list"></div>
+          </div>
+          <div class="card" id="entry-editor"><p class="hint">Оберіть працівника зі списку.</p></div>
+        </div>
+      </div>
+      <div id="sub-fin" class="sub-panel"><div class="card" id="fin-area"></div></div>
+      <div id="sub-chk" class="sub-panel"><div class="card" id="chk-area"></div></div>
+      <div id="sub-exp" class="sub-panel"><div class="card" id="exp-area"></div></div>
+      <div id="sub-reg" class="sub-panel"><div class="card" id="reg-area"></div></div>
+      <div id="sub-help" class="sub-panel"><div class="card" id="help-area"></div></div>
+      <div id="sub-cfg" class="sub-panel"><div class="card" id="cfg-area"></div></div>
+      <div class="step-nav" id="step-nav"></div>
     </div>
   </div>
 </div>
 
 <!-- Бібліотека Supabase (UMD, глобальна змінна `supabase`) -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<!-- ExcelJS — формування xlsx зі стилями й об'єднаними комірками (експорт тарифікації) -->
+<script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
 <script>
 "use strict";
 
@@ -374,8 +605,8 @@ function drawTable(rows) {
         <td>${esc(it.full_name)} ${flag}<br><span class="hint">${esc(it.short_name || "")}</span></td>
         <td><span class="lvl ${it.level}">${LEVEL_LABEL[it.level] || it.level}</span></td>
         <td><span class="kind ${it.kind}">${KIND_LABEL[it.kind] || it.kind}</span></td>
-        <td class="num">${fmt(it.hours_sem1)}</td>
-        <td class="num">${fmt(it.hours_sem2)}</td>
+        <td class="num edit" data-id="${it.id}" data-field="hours_sem1" onclick="startEdit(this)">${fmt(it.hours_sem1)}</td>
+        <td class="num edit" data-id="${it.id}" data-field="hours_sem2" onclick="startEdit(this)">${fmt(it.hours_sem2)}</td>
       </tr>`;
     }
   }
@@ -410,6 +641,2079 @@ function fmt(n) {
 }
 function esc(s) {
   return String(s || "").replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
+}
+
+// ------------------------------------------------------------------
+//  6. РЕДАГУВАННЯ ГОДИН (клац по клітинці → правка → збереження одразу)
+// ------------------------------------------------------------------
+let editing = false; // щоб не відкрити два поля водночас
+
+function startEdit(td) {
+  if (editing) return;
+  editing = true;
+
+  const oldText = td.textContent.trim();
+  const oldVal = Number(oldText) || 0;
+
+  // Замінюємо вміст клітинки на поле вводу
+  td.innerHTML = `<input type="text" inputmode="decimal" value="${oldText}">`;
+  const input = td.querySelector("input");
+  input.focus();
+  input.select();
+
+  let done = false; // захист від подвійного спрацювання (blur + Enter)
+
+  function finish(save) {
+    if (done) return;
+    done = true;
+    editing = false;
+
+    const raw = input.value.trim().replace(",", "."); // приймаємо і кому, і крапку
+    const newVal = Number(raw);
+
+    // Валідація: число, не відʼємне, крок 0.5
+    const valid = raw !== "" && !isNaN(newVal) && newVal >= 0 && (newVal * 2) % 1 === 0;
+
+    if (!save || !valid || newVal === oldVal) {
+      // Скасування або без змін — просто повертаємо старе значення
+      td.textContent = fmt(oldVal);
+      if (save && !valid) flash(td, "failed");
+      return;
+    }
+    saveCell(td, newVal, oldVal);
+  }
+
+  input.addEventListener("blur", () => finish(true));
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); input.blur(); }
+    else if (e.key === "Escape") { finish(false); }
+  });
+}
+
+async function saveCell(td, newVal, oldVal) {
+  const id = td.dataset.id;
+  const field = td.dataset.field;
+
+  td.textContent = fmt(newVal); // показуємо одразу (оптимістично)
+
+  const { error } = await sb
+    .from("plan_component")
+    .update({ [field]: newVal })
+    .eq("id", id);
+
+  if (error) {
+    // Відкат при помилці
+    td.textContent = fmt(oldVal);
+    flash(td, "failed");
+    alert("Не вдалося зберегти: " + error.message);
+    return;
+  }
+
+  // Оновлюємо кеш і перераховуємо суми/звірку без повного перезавантаження
+  const row = planCache.find(r => String(r.id) === String(id));
+  if (row) row[field] = newVal;
+  recomputeTotals();
+  flash(td, "saved");
+}
+
+function flash(td, cls) {
+  td.classList.remove("saved", "failed");
+  void td.offsetWidth;      // рестарт анімації
+  td.classList.add(cls);
+}
+
+// Перерахунок підсумків по галузях і загального рядка (без перемальовування всієї таблиці)
+function recomputeTotals() {
+  const table = document.querySelector("#plan-area table");
+  if (!table) return;
+  drawTable(planCache); // найпростіше й надійно: перемалювати з оновленого кешу
+}
+
+// ------------------------------------------------------------------
+//  7. ВКЛАДКИ (перемикання розділів)
+// ------------------------------------------------------------------
+let loadTabInited = false;
+
+function switchTab(name) {
+  for (const t of ["plans", "load", "tariff"]) {
+    document.getElementById("tab-" + t).classList.toggle("active", name === t);
+    document.getElementById("panel-" + t).classList.toggle("active", name === t);
+  }
+
+  // Дані розділу «Навантаження» вантажимо при першому відкритті
+  if (name === "load" && !loadTabInited) {
+    loadTabInited = true;
+    loadTeachers();
+    loadGroups();
+  }
+  // Тарифікацію — так само, при першому відкритті
+  if (name === "tariff" && !tariffInited) {
+    tariffInited = true;
+    initTariff();
+  }
+}
+
+// ------------------------------------------------------------------
+//  8. ВЧИТЕЛІ (список + редагування ПІБ)
+// ------------------------------------------------------------------
+let teachersCache = [];
+
+async function loadTeachers() {
+  const box = document.getElementById("teacher-list");
+  const { data, error } = await sb.from("teacher").select("id, full_name").order("full_name");
+  if (error) { box.innerHTML = `<div class="msg err" style="display:block">${error.message}</div>`; return; }
+  teachersCache = data;
+  drawTeachers();
+}
+
+function drawTeachers() {
+  const box = document.getElementById("teacher-list");
+  box.innerHTML = teachersCache.map(t => `
+    <div class="teacher-item" data-id="${t.id}">
+      <span class="name">${esc(t.full_name)}</span>
+      <button class="icon-btn" onclick="editTeacher(${t.id})" title="Редагувати">✎</button>
+    </div>`).join("");
+}
+
+function editTeacher(id) {
+  const item = document.querySelector(`.teacher-item[data-id="${id}"]`);
+  const t = teachersCache.find(x => x.id === id);
+  item.innerHTML = `
+    <input type="text" value="${esc(t.full_name)}" style="flex:1">
+    <button class="icon-btn" title="Зберегти">✓</button>`;
+  const input = item.querySelector("input");
+  const btn = item.querySelector("button");
+  input.focus(); input.select();
+
+  let done = false;
+  async function save(commit) {
+    if (done) return; done = true;
+    const val = input.value.trim();
+    if (commit && val && val !== t.full_name) {
+      const { error } = await sb.from("teacher").update({ full_name: val }).eq("id", id);
+      if (error) { alert("Помилка: " + error.message); }
+      else { t.full_name = val; }
+    }
+    drawTeachers();
+  }
+  btn.onclick = () => save(true);
+  input.addEventListener("blur", () => save(true));
+  input.addEventListener("keydown", e => {
+    if (e.key === "Enter") { e.preventDefault(); save(true); }
+    else if (e.key === "Escape") { save(false); }
+  });
+}
+
+// ------------------------------------------------------------------
+//  9. ФАКТИЧНІ ГРУПИ (потоки) + перевірка узгодженості
+// ------------------------------------------------------------------
+let groupsCache = [];
+const KIND_GROUP = {
+  stream: "потік", half_stream: "півпотік", profile: "профільна", subgroup: "підгрупа"
+};
+
+async function loadGroups() {
+  const box = document.getElementById("group-list");
+  // Тягнемо групи разом із покриттям і годинами компонентів
+  const { data, error } = await sb
+    .from("teaching_group")
+    .select(`id, label, kind, note,
+             group_coverage ( id, component_id,
+               plan_component ( id, full_name, hours_sem1, hours_sem2,
+                 profile:profile_id ( local_name ) ) )`)
+    .order("id");
+  if (error) { box.innerHTML = `<div class="msg err" style="display:block">${error.message}</div>`; return; }
+  groupsCache = data;
+  drawGroups();
+}
+
+function drawGroups() {
+  const box = document.getElementById("group-list");
+  if (!groupsCache.length) { box.innerHTML = `<p class="hint">Ще немає груп. Створіть першу кнопкою вище.</p>`; return; }
+
+  box.innerHTML = groupsCache.map(g => {
+    const cov = g.group_coverage || [];
+    const comps = cov.map(c => c.plan_component).filter(Boolean);
+    // Перевірка узгодженості (та сама логіка, що у v_group_consistency)
+    const s1 = new Set(comps.map(c => Number(c.hours_sem1)));
+    const s2 = new Set(comps.map(c => Number(c.hours_sem2)));
+    const consistent = s1.size <= 1 && s2.size <= 1;
+    const cons = comps.length === 0
+      ? `<span class="hint">без покриття</span>`
+      : consistent
+        ? `<span class="cons-ok">узгоджено ✓ ${fmt([...s1][0]||0)}/${fmt([...s2][0]||0)}</span>`
+        : `<span class="cons-err">розбіжність годин ✗</span>`;
+
+    const list = comps.map(c =>
+      `<div class="cover-item"><span>${esc(c.profile?.local_name || "—")}: ${esc(c.full_name)}</span>
+       <span class="hrs">${fmt(c.hours_sem1)}/${fmt(c.hours_sem2)}</span></div>`).join("");
+
+    return `<div class="group-card">
+      <h3>${esc(g.label)} <span class="badge-kind">${KIND_GROUP[g.kind] || g.kind}</span> ${cons}</h3>
+      ${list || '<p class="hint">Компоненти не додані.</p>'}
+      <div style="margin-top:8px;">
+        <button class="icon-btn" onclick="editGroupCoverage(${g.id})">Змінити покриття</button>
+        <button class="icon-btn" onclick="deleteGroup(${g.id})">Видалити</button>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+// --- Створення нової групи ---
+function openNewGroup() {
+  const ed = document.getElementById("group-editor");
+  ed.innerHTML = `
+    <div class="group-card" style="margin-top:14px;background:#fafbfd;">
+      <h3>Нова група</h3>
+      <label>Назва</label>
+      <input id="ng-label" placeholder="напр. Потік літератур 10">
+      <label>Тип</label>
+      <select id="ng-kind">
+        <option value="stream">потік (кілька профілів)</option>
+        <option value="half_stream">півпотік</option>
+        <option value="profile">профільна (один профіль)</option>
+        <option value="subgroup">підгрупа</option>
+      </select>
+      <button class="primary" onclick="createGroup()">Створити</button>
+      <button class="icon-btn" onclick="document.getElementById('group-editor').innerHTML=''">Скасувати</button>
+    </div>`;
+}
+
+async function createGroup() {
+  const label = document.getElementById("ng-label").value.trim();
+  const kind = document.getElementById("ng-kind").value;
+  if (!label) { alert("Введіть назву групи."); return; }
+  const yearId = await currentYearId();
+  const { data, error } = await sb.from("teaching_group")
+    .insert({ label, kind, year_id: yearId }).select().single();
+  if (error) { alert("Помилка: " + error.message); return; }
+  document.getElementById("group-editor").innerHTML = "";
+  await loadGroups();
+  editGroupCoverage(data.id); // одразу пропонуємо додати покриття
+}
+
+async function deleteGroup(id) {
+  if (!confirm("Видалити групу разом із її покриттям?")) return;
+  // Спершу прибираємо покриття (on delete cascade це зробить, але для певності)
+  await sb.from("teaching_group").delete().eq("id", id);
+  await loadGroups();
+}
+
+// --- Редагування покриття (які компоненти зводить група) ---
+async function editGroupCoverage(groupId) {
+  const ed = document.getElementById("group-editor");
+  ed.innerHTML = `<div class="group-card" style="margin-top:14px;background:#fafbfd;"><div class="loading">Завантаження компонентів…</div></div>`;
+
+  // Тягнемо всі компоненти пілоту з профілем і годинами
+  const { data: comps, error } = await sb
+    .from("plan_component")
+    .select("id, full_name, hours_sem1, hours_sem2, profile:profile_id(local_name, code)")
+    .not("profile_id", "is", null)
+    .order("full_name");
+  if (error) { ed.innerHTML = `<div class="msg err" style="display:block">${error.message}</div>`; return; }
+
+  // Поточне покриття цієї групи
+  const grp = groupsCache.find(g => g.id === groupId);
+  const covered = new Set((grp?.group_coverage || []).map(c => c.component_id));
+
+  const rows = comps.map(c => `
+    <div class="cover-item">
+      <label>
+        <input type="checkbox" value="${c.id}" ${covered.has(c.id) ? "checked" : ""}
+               onchange="previewConsistency()">
+        <span>${esc(c.profile?.local_name || "—")}: ${esc(c.full_name)}</span>
+      </label>
+      <span class="hrs" data-s1="${c.hours_sem1}" data-s2="${c.hours_sem2}">${fmt(c.hours_sem1)}/${fmt(c.hours_sem2)}</span>
+    </div>`).join("");
+
+  ed.innerHTML = `
+    <div class="group-card" style="margin-top:14px;background:#fafbfd;">
+      <h3>Покриття: ${esc(grp?.label || "")} <span id="prev-cons"></span></h3>
+      <p class="hint">Позначте компоненти, які ця група зводить. Перевірка узгодженості — наживо.</p>
+      <div id="cover-rows" style="max-height:320px;overflow:auto;">${rows}</div>
+      <div style="margin-top:10px;">
+        <button class="primary" onclick="saveCoverage(${groupId})">Зберегти покриття</button>
+        <button class="icon-btn" onclick="document.getElementById('group-editor').innerHTML=''">Закрити</button>
+      </div>
+    </div>`;
+  previewConsistency();
+}
+
+// Жива перевірка узгодженості під час вибору галочок
+function previewConsistency() {
+  const checks = [...document.querySelectorAll("#cover-rows input:checked")];
+  const el = document.getElementById("prev-cons");
+  if (checks.length === 0) { el.innerHTML = `<span class="hint">нічого не вибрано</span>`; return; }
+  const s1 = new Set(), s2 = new Set();
+  checks.forEach(ch => {
+    const hrs = ch.closest(".cover-item").querySelector(".hrs");
+    s1.add(Number(hrs.dataset.s1)); s2.add(Number(hrs.dataset.s2));
+  });
+  const ok = s1.size <= 1 && s2.size <= 1;
+  el.innerHTML = ok
+    ? `<span class="cons-ok">узгоджено ✓ ${fmt([...s1][0])}/${fmt([...s2][0])}</span>`
+    : `<span class="cons-err">розбіжність годин ✗ (${[...s1].map(fmt).join("/")} · ${[...s2].map(fmt).join("/")})</span>`;
+}
+
+async function saveCoverage(groupId) {
+  const checks = [...document.querySelectorAll("#cover-rows input:checked")].map(c => Number(c.value));
+  // Простий підхід: прибрати старе покриття, вставити нове
+  const { error: delErr } = await sb.from("group_coverage").delete().eq("group_id", groupId);
+  if (delErr) { alert("Помилка очищення: " + delErr.message); return; }
+  if (checks.length) {
+    const rows = checks.map(cid => ({ group_id: groupId, component_id: cid }));
+    const { error: insErr } = await sb.from("group_coverage").insert(rows);
+    if (insErr) { alert("Помилка збереження: " + insErr.message); return; }
+  }
+  document.getElementById("group-editor").innerHTML = "";
+  await loadGroups();
+}
+
+// Допоміжне: id поточного навчального року
+let _yearId = null;
+async function currentYearId() {
+  if (_yearId) return _yearId;
+  const { data } = await sb.from("academic_year").select("id").eq("is_current", true).single();
+  _yearId = data?.id;
+  return _yearId;
+}
+
+// ==================================================================
+//  10. ТАРИФІКАЦІЯ
+//  Форма: Додаток 1 до Інструкції (наказ МО України №102 від 15.04.1993).
+//  Таблиці й права — у tarification_stage1.sql.
+//  Ролі: deputy (заступник) — педагогічні дані; accountant (бухгалтер) —
+//  розряд, ставки, суми; director — перегляд і затвердження.
+//  Кожне поле зберігається одразу після зміни (як години в «Планах»).
+// ==================================================================
+let tariffInited = false;
+const T = {
+  role: null,          // роль поточного користувача
+  periods: [],         // усі знімки тарифікації
+  period: null,        // обраний знімок
+  bands: [], raiseTypes: [], supTypes: [], reasons: [],
+  teachers: [], education: [],
+  entries: [], entryId: null,
+  sub: "req"
+};
+const CATEGORIES = ["спеціаліст", "ІІ категорія", "І категорія", "вища категорія"];
+const POSITIONS = ["вчитель", "директор", "заступник директора", "практичний психолог",
+  "соціальний педагог", "педагог-організатор", "бібліотекар", "керівник гуртка",
+  "вихователь ГПД", "асистент вчителя"];
+const TITLES = ["старший учитель", "учитель-методист"];
+const EMPLOYMENT = ["основний", "сумісник", "внутрішній сумісник", "вакансія"];
+const REASON_GRP_LABEL = {
+  "вивільнення вчителів початкових класів": "з них у зв'язку з вивільненням вчителів початкових класів від проведення уроків",
+  "поділ класів на групи": "у зв'язку з діленням класів на групи при проведенні занять з",
+  "інше": "інші"
+};
+const MONTHS_GEN = ["січня", "лютого", "березня", "квітня", "травня", "червня",
+  "липня", "серпня", "вересня", "жовтня", "листопада", "грудня"];
+
+// ---------- дрібні помічники ----------
+const canDep = () => T.role === "deputy" && T.period?.status === "draft";
+const canAcc = () => T.role === "accountant" && T.period?.status === "draft";
+const dis = ok => ok ? "" : "disabled";
+const fmtUa = n => fmt(n).replace(".", ",");   // 8,5 замість 8.5
+const inVal = v => v === null || v === undefined ? "" : String(v).replace(".", ",");
+function money(n) {
+  if (n === null || n === undefined || n === "") return "—";
+  return Number(n).toLocaleString("uk-UA", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function dateUa(iso) {
+  if (!iso) return "";
+  const [y, m, d] = iso.split("-").map(Number);
+  return `${d} ${MONTHS_GEN[m - 1]} ${y} р.`;
+}
+// Значення поля: type = "num" | "int" | "text" | "date" | "bool"
+function readVal(el, type) {
+  if (type === "bool") return el.checked;
+  const raw = (el.value ?? "").trim();
+  if (raw === "") return null;
+  if (type === "num") {
+    const x = Number(raw.replace(/\s/g, "").replace(",", "."));
+    return isNaN(x) ? undefined : x;
+  }
+  if (type === "int") {
+    const x = Number(raw);
+    return Number.isInteger(x) ? x : undefined;
+  }
+  return raw;
+}
+function mark(el, ok) {
+  if (!el) return;
+  el.classList.remove("saved-ok", "saved-err");
+  void el.offsetWidth;
+  el.classList.add(ok ? "saved-ok" : "saved-err");
+}
+function errBox(text) { return `<div class="msg err" style="display:block">${esc(text)}</div>`; }
+
+// update з перевіркою: якщо RLS не дала змінити жодного рядка — це теж помилка
+async function saveRow(table, match, patch, el) {
+  const { data, error } = await sb.from(table).update(patch).match(match).select();
+  const err = error ? error.message
+    : (!data || !data.length) ? "немає прав на зміну (або тарифікацію вже затверджено)" : null;
+  mark(el, !err);
+  if (err) alert("Не збережено: " + err);
+  return !err;
+}
+async function upsertRow(table, row, onConflict, el) {
+  const { error } = await sb.from(table).upsert(row, { onConflict }).select();
+  mark(el, !error);
+  if (error) alert("Не збережено: " + error.message);
+  return !error;
+}
+async function insertRows(table, rows) {
+  const { data, error } = await sb.from(table).insert(rows).select();
+  if (error) { alert("Помилка: " + error.message); return null; }
+  return data;
+}
+async function deleteRows(table, match) {
+  const { error } = await sb.from(table).delete().match(match);
+  if (error) { alert("Помилка видалення: " + error.message); return false; }
+  return true;
+}
+// Перевірка значення перед збереженням; повертає false, якщо значення некоректне
+function checkVal(v, el, opts = {}) {
+  if (v === undefined) { mark(el, false); alert("Введіть число."); return false; }
+  if (opts.step05 && v !== null && (v * 2) % 1 !== 0) {
+    mark(el, false); alert("Години — з кроком 0,5."); return false;
+  }
+  if (opts.required && v === null) { mark(el, false); alert("Поле не може бути порожнім."); return false; }
+  return true;
+}
+
+// ------------------------------------------------------------------
+//  10.1 Старт розділу: роль, довідники, знімки
+// ------------------------------------------------------------------
+async function initTariff() {
+  const panel = document.getElementById("panel-tariff");
+  const { data: { session } } = await sb.auth.getSession();
+  const { data: roleRow, error } = await sb.from("app_user_role")
+    .select("role").eq("user_id", session.user.id).maybeSingle();
+  if (error) {
+    panel.innerHTML = errBox("Таблиці тарифікації не знайдено. Спершу запустіть tarification_stage1.sql у Supabase. (" + error.message + ")");
+    return;
+  }
+  if (!roleRow) {
+    panel.innerHTML = errBox("Вашому акаунту не призначено роль (заступник / бухгалтер / директор). Додайте запис у таблицю app_user_role.");
+    return;
+  }
+  T.role = roleRow.role;
+  document.getElementById("role-badge").textContent =
+    { deputy: "заступник директора", accountant: "бухгалтер", director: "директор" }[T.role];
+  document.getElementById("btn-new-period").style.display = T.role === "deputy" ? "" : "none";
+
+  const [b, r, s, x] = await Promise.all([
+    sb.from("tariff_band").select("*").order("sort"),
+    sb.from("raise_type").select("*").order("sort"),
+    sb.from("supplement_type").select("*").order("form_column").order("sort"),
+    sb.from("indicator_row").select("*").order("sort").order("id")
+  ]);
+  const firstErr = [b, r, s].find(q => q.error);
+  if (firstErr) { panel.innerHTML = errBox(firstErr.error.message); return; }
+  T.bands = b.data; T.raiseTypes = r.data; T.supTypes = s.data;
+  T.indRows = x.error ? [] : x.data;
+  if (x.error) setTimeout(() => alert("Потрібне оновлення бази: запустіть tarification_stage2.sql у Supabase (SQL Editor). Без нього не працюватиме таблиця показників."), 300);
+
+  await loadTariffTeachers();
+  await loadPeriods();
+}
+
+async function loadTariffTeachers() {
+  const { data, error } = await sb.from("teacher")
+    .select("id, full_name, category, ped_title, is_active").order("full_name");
+  if (error) { alert(error.message); return; }
+  T.teachers = data;
+}
+
+async function loadPeriods(selectId) {
+  const { data, error } = await sb.from("tariff_period").select("*").order("on_date", { ascending: false });
+  if (error) { alert(error.message); return; }
+  T.periods = data;
+  const sel = document.getElementById("sel-period");
+  if (!data.length) {
+    sel.innerHTML = `<option value="">— ще немає —</option>`;
+    T.period = null;
+    renderPeriodStatus();
+    renderSub();
+    return;
+  }
+  sel.innerHTML = data.map(p =>
+    `<option value="${p.id}">${dateUa(p.on_date)}${p.status === "approved" ? " · затверджено" : ""}</option>`).join("");
+  const id = selectId || T.period?.id || data[0].id;
+  sel.value = id;
+  selectPeriod(id);
+}
+
+function selectPeriod(id) {
+  T.period = T.periods.find(p => String(p.id) === String(id)) || null;
+  T.entryId = null;
+  renderPeriodStatus();
+  renderSub();
+}
+
+function renderPeriodStatus() {
+  const box = document.getElementById("period-status");
+  const p = T.period;
+  if (!p) { box.innerHTML = ""; return; }
+  let html = p.status === "approved"
+    ? `<span class="badge approved">затверджено</span>`
+    : `<span class="badge draft">чернетка</span>`;
+  if (T.role === "director") {
+    html += p.status === "draft"
+      ? ` <button class="icon-btn" onclick="setPeriodStatus('approved')">Затвердити</button>`
+      : ` <button class="icon-btn" onclick="setPeriodStatus('draft')">Повернути на доопрацювання</button>`;
+  }
+  box.innerHTML = html;
+}
+
+async function setPeriodStatus(status) {
+  const msg = status === "approved"
+    ? "Затвердити тарифікацію? Після цього редагування буде закрито."
+    : "Повернути тарифікацію в чернетку?";
+  if (!confirm(msg)) return;
+  if (await saveRow("tariff_period", { id: T.period.id }, { status }, null)) loadPeriods(T.period.id);
+}
+
+// ------------------------------------------------------------------
+//  10.2 Нова тарифікація (з копіюванням попередньої)
+// ------------------------------------------------------------------
+function openNewPeriod() {
+  const prev = T.periods[0];
+  document.getElementById("new-period-box").innerHTML = `
+    <div class="card" style="background:#fafbfd;">
+      <h2>Нова тарифікація</h2>
+      <div class="grid2">
+        <div><label>Станом на</label><input type="date" id="np-date"></div>
+      </div>
+      ${prev ? `<label style="display:flex;gap:8px;align-items:center;margin-top:14px;">
+        <input type="checkbox" id="np-copy" checked style="width:auto;">
+        Скопіювати реквізити, показники, працівників, години й доплати з тарифікації на ${dateUa(prev.on_date)}
+      </label>
+      <p class="hint">Ставки й суми бухгалтера не копіюються — їх вносить бухгалтер.</p>` : ""}
+      <button class="primary" onclick="createPeriod()">Створити</button>
+      <button class="icon-btn" onclick="document.getElementById('new-period-box').innerHTML=''">Скасувати</button>
+      <div id="np-msg" class="msg"></div>
+    </div>`;
+}
+
+async function createPeriod() {
+  const date = document.getElementById("np-date").value;
+  if (!date) { showMsg("np-msg", "Вкажіть дату.", "err"); return; }
+  const prev = T.periods[0];
+  const copy = prev && document.getElementById("np-copy")?.checked;
+  showMsg("np-msg", "Створюємо…", "");
+
+  const base = {
+    year_id: await currentYearId(),
+    on_date: date,
+    institution_name: prev?.institution_name || "(назва закладу — заповніть у кроці «Реквізити»)",
+    locality: prev?.locality || null,
+    approved_position: prev?.approved_position || "Директор",
+    agreed_position: prev?.agreed_position || null,
+    agreed_name: prev?.agreed_name || null,
+    approved_name: prev?.approved_name || null,
+    director_name: prev?.director_name || null,
+    accountant_name: prev?.accountant_name || null,
+    based_on: copy ? prev.id : null
+  };
+  const created = await insertRows("tariff_period", [base]);
+  if (!created) { showMsg("np-msg", "Не вдалося створити.", "err"); return; }
+  const newId = created[0].id;
+
+  if (copy) {
+    showMsg("np-msg", "Копіюємо дані попередньої тарифікації…", "");
+    const ok = await copyPeriodData(prev.id, newId);
+    if (!ok) { showMsg("np-msg", "Тарифікацію створено, але копіювання перервалося. Перевірте дані.", "err"); }
+  }
+  document.getElementById("new-period-box").innerHTML = "";
+  await loadPeriods(newId);
+}
+
+// Копіює педагогічну частину: показники, працівників, рядки, підвищення, доплати
+async function copyPeriodData(fromId, toId) {
+  const [ind, ext, ent] = await Promise.all([
+    sb.from("tariff_indicator").select("*").eq("period_id", fromId),
+    sb.from("tariff_indicator_value").select("*").eq("period_id", fromId),
+    sb.from("tariff_entry").select(`id, teacher_id, row_no, employment, category, ped_title, note,
+        tariff_line ( id, sort, kind, position_name, subjects, rate_fraction, band_code, hours,
+                       hours_norm, notebook_hours, notebook_pct,
+                       tariff_line_raise ( raise_type_id, pct ) ),
+        tariff_supplement ( type_id, pct, hours, note )`).eq("period_id", fromId).order("row_no")
+  ]);
+  if (ind.error || ext.error || ent.error) return false;
+
+  if (ind.data.length && !await insertRows("tariff_indicator",
+      ind.data.map(r => ({ ...r, period_id: toId })))) return false;
+  if (ext.data.length && !await insertRows("tariff_indicator_value",
+      ext.data.map(r => ({ ...r, period_id: toId })))) return false;
+
+  for (const e of ent.data) {
+    // Категорію і звання беремо актуальні з реєстру (могли змінитися після атестації)
+    const t = T.teachers.find(x => x.id === e.teacher_id);
+    const ne = await insertRows("tariff_entry", [{
+      period_id: toId, teacher_id: e.teacher_id, row_no: e.row_no, employment: e.employment,
+      category: t?.category ?? e.category, ped_title: t?.ped_title ?? e.ped_title, note: e.note
+    }]);
+    if (!ne) return false;
+    const entryId = ne[0].id;
+
+    for (const l of (e.tariff_line || []).sort((a, b) => a.sort - b.sort)) {
+      const { id, tariff_line_raise, ...rest } = l;
+      const nl = await insertRows("tariff_line", [{ ...rest, entry_id: entryId }]);
+      if (!nl) return false;
+      if (tariff_line_raise?.length && !await insertRows("tariff_line_raise",
+          tariff_line_raise.map(r => ({ ...r, line_id: nl[0].id })))) return false;
+    }
+    if (e.tariff_supplement?.length && !await insertRows("tariff_supplement",
+        e.tariff_supplement.map(s => ({ ...s, entry_id: entryId })))) return false;
+  }
+  return true;
+}
+
+// ------------------------------------------------------------------
+//  10.3 Реквізити (титульна частина форми)
+// ------------------------------------------------------------------
+function renderRequisites() {
+  const p = T.period, ed = dis(canDep());
+  const f = (label, field, type = "text") => `
+    <div><label>${label}</label>
+      <input type="${type === "date" ? "date" : "text"}" value="${esc(p[field] ?? "")}" ${ed}
+             onchange="savePeriodField('${field}', this, '${type}')"></div>`;
+  document.getElementById("req-area").innerHTML = `
+    <h2>Титульна частина ${qt("Шапка першої сторінки форми: ПОГОДЖЕНО / ЗАТВЕРДЖУЮ, назва закладу й дата. Підписи — під таблицею списку.")}</h2>
+    <p class="hint" id="req-preview" style="margin-bottom:10px;"></p>
+    <div class="grid2">
+      ${f("Назва закладу", "institution_name")}
+      ${f("Місто, район, село", "locality")}
+      <div><label>Станом на</label><input type="date" value="${p.on_date}" ${ed}
+           onchange="savePeriodField('on_date', this, 'date')"></div>
+    </div>
+    <div class="sec-title">ПОГОДЖЕНО</div>
+    <div class="grid2">
+      ${f("Посада", "agreed_position")}${f("ПІБ", "agreed_name")}${f("Дата", "agreed_date", "date")}
+    </div>
+    <div class="sec-title">ЗАТВЕРДЖУЮ</div>
+    <div class="grid2">
+      ${f("Посада", "approved_position")}${f("ПІБ", "approved_name")}${f("Дата", "approved_date", "date")}
+    </div>
+    <div class="sec-title">Підписи під таблицею</div>
+    <div class="grid2">${f("Директор", "director_name")}${f("Бухгалтер", "accountant_name")}</div>`;
+  updateReqPreview();
+}
+
+function updateReqPreview() {
+  const p = T.period;
+  document.getElementById("req-preview").innerHTML =
+    `Тарифікаційний список вчителів та інших працівників <b>${esc(p.institution_name || "…")}</b>
+     на <b>${dateUa(p.on_date)}</b>${p.locality ? ", " + esc(p.locality) : ""}`;
+}
+
+async function savePeriodField(field, el, type) {
+  const v = readVal(el, type);
+  if (field === "institution_name" || field === "on_date") {
+    if (!checkVal(v, el, { required: true })) return;
+  }
+  if (await saveRow("tariff_period", { id: T.period.id }, { [field]: v }, el)) {
+    T.period[field] = v;
+    updateReqPreview();
+    if (field === "on_date") loadPeriods(T.period.id);   // оновити підпис у списку
+  }
+}
+
+// ------------------------------------------------------------------
+//  10.4 Показники на початок навчального року (рядки — з довідника indicator_row)
+// ------------------------------------------------------------------
+const SECTION_TITLE = {
+  release:  "у зв'язку з вивільненням вчителів початкових класів від проведення уроків:",
+  division: "у зв'язку з діленням класів на групи при проведенні занять з:"
+};
+const SOURCE_LABEL = {
+  input: "вводиться вручну", sum_division: "= сума рядків поділу на групи",
+  sum_release: "= сума рядків вивільнення", sum_both: "= вивільнення + поділ"
+};
+
+// Рахує всі значення таблиці: V[rowId][band] (для автоматичних рядків — сума), total[band]
+function computeIndicators(values) {
+  const V = {};
+  for (const v of values) (V[v.row_id] ||= {})[v.band_code] = Number(v.value);
+  const rows = T.indRows.filter(r => r.active);
+  const sumSection = (sec, band) => rows.filter(r => r.section === sec && r.in_total)
+    .reduce((a, r) => a + (V[r.id]?.[band] || 0), 0);
+  const total = {};
+  for (const b of T.bands) {
+    let t = 0;
+    for (const r of rows.filter(x => x.section === "part")) {
+      if (r.source !== "input") {
+        const s = r.source === "sum_division" ? sumSection("division", b.code)
+                : r.source === "sum_release" ? sumSection("release", b.code)
+                : sumSection("division", b.code) + sumSection("release", b.code);
+        (V[r.id] ||= {})[b.code] = s;
+      }
+      if (r.in_total) t += V[r.id]?.[b.code] || 0;
+    }
+    total[b.code] = t;
+  }
+  return { V, total, rows };
+}
+
+async function renderIndicators() {
+  const area = document.getElementById("ind-area");
+  area.innerHTML = `<div class="loading">Завантаження…</div>`;
+  const pid = T.period.id;
+  const [ind, val, chk] = await Promise.all([
+    sb.from("tariff_indicator").select("*").eq("period_id", pid),
+    sb.from("tariff_indicator_value").select("*").eq("period_id", pid),
+    sb.from("v_tariff_hours_check").select("*").eq("period_id", pid)
+  ]);
+  const e = [ind, val, chk].find(q => q.error);
+  if (e) {
+    area.innerHTML = errBox(e.error.message.includes("tariff_indicator_value")
+      ? "Потрібне оновлення бази: запустіть tarification_stage2.sql у Supabase (SQL Editor)." : e.error.message);
+    return;
+  }
+  const I = {}; ind.data.forEach(r => I[r.band_code] = r);
+  const C = {}; chk.data.forEach(r => C[r.band_code] = r);
+  const { V, total, rows } = computeIndicators(val.data);
+  const ed = dis(canDep());
+  const sum = arr => arr.reduce((a, b) => a + (Number(b) || 0), 0);
+  const nb = T.bands.length + 2;
+
+  const head = `<tr><th>Показник</th>${T.bands.map(b => `<th class="num">${esc(b.label)}</th>`).join("")}<th class="num">Разом</th></tr>`;
+  const baseRow = (no, label, field, type) => `<tr>
+      <td>${no} ${label}</td>
+      ${T.bands.map(b => `<td class="num"><input class="n-s" value="${inVal(I[b.code]?.[field])}" ${ed}
+          onchange="saveIndicator('${b.code}', '${field}', this, '${type}')"></td>`).join("")}
+      <td class="calc"><b>${fmtUa(sum(T.bands.map(b => I[b.code]?.[field])))}</b></td></tr>`;
+  const valRow = (r, pad) => {
+    const auto = r.section === "part" && r.source !== "input";
+    const cells = T.bands.map(b => auto
+      ? `<td class="calc" title="${esc(SOURCE_LABEL[r.source])}">${fmtUa(V[r.id]?.[b.code] || 0)}</td>`
+      : `<td class="num"><input class="n-s" value="${inVal(V[r.id]?.[b.code])}" ${ed}
+           onchange="saveIndicatorValue(${r.id}, '${b.code}', this)"></td>`).join("");
+    const note = !r.in_total ? ` <span class="hint">(довідково, у суми не входить)</span>`
+               : auto ? ` ${qt("Рахується автоматично: " + SOURCE_LABEL[r.source] + ".")}` : "";
+    return `<tr><td style="padding-left:${pad}px;">${esc(r.letter ? r.letter + " " : "")}${esc(r.label)}${note}</td>
+      ${cells}<td class="calc">${fmtUa(sum(T.bands.map(b => V[r.id]?.[b.code])))}</td></tr>`;
+  };
+
+  let body = baseRow("1.", "Число класів на 01 вересня", "classes_count", "int")
+           + baseRow("2.", "Число класів-комплектів на 01 вересня", "class_sets_count", "int")
+           + baseRow("3.", "Число учнів на 01 вересня", "students_count", "int")
+           + `<tr><td colspan="${nb}">4. Загальне число годин викладацької роботи в тиждень по тарифікації, в тому числі:</td></tr>`;
+  for (const r of rows.filter(x => x.section === "part")) body += valRow(r, 20);
+  body += `<tr class="branch-row"><td>всього</td>${T.bands.map(b => `<td class="num sum">${fmtUa(total[b.code])}</td>`).join("")}
+           <td class="num sum">${fmtUa(sum(Object.values(total)))}</td></tr>`;
+  body += `<tr><td colspan="${nb}" class="hint" style="padding-top:8px;">з них:</td></tr>`;
+  for (const sec of ["release", "division"]) {
+    const list = rows.filter(x => x.section === sec);
+    if (!list.length) continue;
+    body += `<tr><td colspan="${nb}" class="hint" style="padding-left:14px;">${SECTION_TITLE[sec]}</td></tr>`;
+    for (const r of list) body += valRow(r, 30);
+  }
+
+  area.innerHTML = `
+    <h2>Показники на початок навчального року ${qt("Верхня таблиця форми. Колонки й рядки налаштовуються в «⚙ Налаштування форми». «Всього» рахується як сума рядків а), б), в)…; рядки поділу на групи — розшифровка, з них автоматично рахується «в) години поділу».")}</h2>
+    <div style="overflow-x:auto;"><table class="tt"><thead>${head}</thead><tbody>${body}</tbody></table></div>
+    <p class="hint">Колонки й перелік рядків змінюються в розділі «⚙ Налаштування форми».</p>
+
+    <div class="sec-title">Звірка: «всього» проти суми годин працівників (графи 9–11)</div>
+    <table class="tt" style="max-width:640px;">
+      <thead><tr><th>Колонка</th><th class="num">Всього</th><th class="num">Працівники</th><th></th></tr></thead>
+      <tbody>${T.bands.map(b => {
+        const c = C[b.code] || {};
+        return `<tr><td>${esc(b.label)}</td><td class="calc">${fmtUa(c.indicator_total)}</td>
+          <td class="calc">${fmtUa(c.staff_hours)}</td>
+          <td>${c.is_ok ? '<span class="verdict ok">✓</span>'
+                        : `<span class="verdict err">різниця ${fmtUa((Number(c.staff_hours) || 0) - (Number(c.indicator_total) || 0))}</span>`}</td></tr>`;
+      }).join("")}</tbody>
+    </table>`;
+}
+
+async function saveIndicator(band, field, el, type) {
+  const v = readVal(el, type);
+  if (!checkVal(v, el)) return;
+  if (await upsertRow("tariff_indicator",
+      { period_id: T.period.id, band_code: band, [field]: v }, "period_id,band_code", el))
+    renderIndicators();
+}
+
+async function saveIndicatorValue(rowId, band, el) {
+  const v = readVal(el, "num");
+  if (!checkVal(v, el, { step05: true })) return;
+  const key = { period_id: T.period.id, row_id: rowId, band_code: band };
+  const ok = v === null || v === 0
+    ? await deleteRows("tariff_indicator_value", key)
+    : await upsertRow("tariff_indicator_value", { ...key, value: v }, "period_id,row_id,band_code", el);
+  if (ok) renderIndicators();
+}
+
+// ------------------------------------------------------------------
+//  10.10 Налаштування форми: назви колонок і рядки таблиці показників
+// ------------------------------------------------------------------
+function renderSettings() {
+  const ed = dis(T.role === "deputy");
+  const area = document.getElementById("cfg-area");
+  const secOpts = s => ["part", "release", "division"].map(x =>
+    `<option value="${x}" ${x === s ? "selected" : ""}>${{ part: "складова рядка 4 (а, б, в…)", release: "з них: вивільнення", division: "з них: поділ на групи" }[x]}</option>`).join("");
+  const srcOpts = (r) => Object.entries(SOURCE_LABEL).map(([k, t]) =>
+    `<option value="${k}" ${k === r.source ? "selected" : ""}>${t}</option>`).join("");
+  const rows = [...T.indRows].sort((a, b) => a.sort - b.sort);
+  area.innerHTML = `
+    <h2>Налаштування форми</h2>
+    <p class="hint">Ці налаштування спільні для всіх тарифікацій закладу. ${T.role === "deputy" ? "" : "<b>Змінювати може заступник директора.</b>"}</p>
+
+    <div class="sec-title">Колонки (групи класів) ${qt("Три колонки форми: години (графи 9–11), зарплата (12–14), зошити (15–17) і таблиця показників. Назву можна змінити, напр. «5–9», «10 (пілот)», «10–11 (без пілоту)». Колонка — це номер, а не клас: якщо в ній уже є години працівників, після перейменування вони лишаться в тій самій колонці.")}</div>
+    <table class="tt" style="max-width:520px;"><thead><tr><th>№</th><th>Назва колонки</th></tr></thead><tbody>
+      ${T.bands.map((b, i) => `<tr><td>${i + 1}</td><td><input value="${esc(b.label)}" ${ed}
+          onchange="saveBandLabel('${b.code}', this)"></td></tr>`).join("")}
+    </tbody></table>
+
+    <div class="sec-title">Рядки таблиці показників ${qt("Складові рядка 4 (а, б, в…) дають «всього». Рядки «з них» — розшифровка. Складову можна зробити автоматичною: напр. «в) години поділу» = сума рядків поділу на групи. Довідковий рядок (без галочки «у суми») показується, але не додається.")}</div>
+    <div style="overflow-x:auto;"><table class="tt"><thead><tr>
+      <th>Розділ</th><th>Літера</th><th>Назва рядка</th><th>Як заповнюється</th><th>У суми</th><th>Порядок</th><th></th></tr></thead><tbody>
+      ${rows.map(r => `<tr style="${r.active ? "" : "opacity:.5"}">
+        <td style="min-width:190px;"><select ${ed} onchange="saveIndRow(${r.id}, 'section', this, 'text')">${secOpts(r.section)}</select></td>
+        <td><input class="n-s" value="${esc(r.letter || "")}" ${ed} onchange="saveIndRow(${r.id}, 'letter', this, 'text')"></td>
+        <td style="min-width:260px;"><input value="${esc(r.label)}" ${ed} onchange="saveIndRow(${r.id}, 'label', this, 'text')"></td>
+        <td style="min-width:200px;">${r.section === "part"
+            ? `<select ${ed} onchange="saveIndRow(${r.id}, 'source', this, 'text')">${srcOpts(r)}</select>`
+            : `<span class="hint">вводиться вручну</span>`}</td>
+        <td style="text-align:center;"><input type="checkbox" style="width:auto;" ${r.in_total ? "checked" : ""} ${ed}
+            onchange="saveIndRow(${r.id}, 'in_total', this, 'bool')"></td>
+        <td><input class="n-s" value="${r.sort}" ${ed} onchange="saveIndRow(${r.id}, 'sort', this, 'int')"></td>
+        <td>${T.role === "deputy" ? `<button class="icon-btn" onclick="toggleIndRow(${r.id})">${r.active ? "приховати" : "показати"}</button>` : ""}</td>
+      </tr>`).join("")}
+    </tbody></table></div>
+    ${T.role === "deputy" ? `<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
+      <button class="icon-btn" onclick="addIndRow('part')">+ складова (а, б…)</button>
+      <button class="icon-btn" onclick="addIndRow('release')">+ рядок вивільнення</button>
+      <button class="icon-btn" onclick="addIndRow('division')">+ рядок поділу на групи</button></div>
+      <p class="hint">Прихований рядок не показується ні в застосунку, ні в Excel, але його дані зберігаються.</p>` : ""}`;
+}
+
+async function saveBandLabel(code, el) {
+  const v = readVal(el, "text");
+  if (!checkVal(v, el, { required: true })) return;
+  if (await saveRow("tariff_band", { code }, { label: v }, el)) T.bands.find(b => b.code === code).label = v;
+}
+async function reloadIndRows() {
+  const { data } = await sb.from("indicator_row").select("*").order("sort").order("id");
+  T.indRows = data || [];
+}
+async function saveIndRow(id, field, el, type) {
+  const v = readVal(el, type);
+  if (!checkVal(v, el, { required: ["label", "section", "sort"].includes(field) })) return;
+  const patch = { [field]: v };
+  if (field === "section" && v !== "part") patch.source = "input";
+  if (await saveRow("indicator_row", { id }, patch, el)) {
+    await reloadIndRows();
+    if (field === "section" || field === "source") renderSettings();
+  } else renderSettings();
+}
+async function toggleIndRow(id) {
+  const r = T.indRows.find(x => x.id === id);
+  if (await saveRow("indicator_row", { id }, { active: !r.active }, null)) { await reloadIndRows(); renderSettings(); }
+}
+async function addIndRow(section) {
+  const maxSort = Math.max(0, ...T.indRows.filter(r => r.section === section).map(r => r.sort));
+  if (await insertRows("indicator_row", [{ section, label: "новий рядок", sort: maxSort + 10 }])) {
+    await reloadIndRows(); renderSettings();
+  }
+}
+
+// ------------------------------------------------------------------
+//  10.5 Працівники у тарифікації: список
+// ------------------------------------------------------------------
+async function loadEntries() {
+  const box = document.getElementById("entry-list");
+  document.getElementById("btn-add-entry").style.display = canDep() ? "" : "none";
+  box.innerHTML = `<div class="loading">Завантаження…</div>`;
+  const [ent, tot] = await Promise.all([
+    sb.from("tariff_entry")
+      .select("id, row_no, employment, category, ped_title, note, teacher_id, teacher:teacher_id(full_name)")
+      .eq("period_id", T.period.id).order("row_no"),
+    sb.from("v_tariff_entry_total").select("entry_id, h_1_4, h_5_9, h_10_12, grand_total")
+      .eq("period_id", T.period.id)
+  ]);
+  if (ent.error || tot.error) { box.innerHTML = errBox((ent.error || tot.error).message); return; }
+  const totals = {}; tot.data.forEach(t => totals[t.entry_id] = t);
+  T.entries = ent.data.map(e => ({ ...e, tot: totals[e.id] || {} }));
+  drawEntryList();
+  if (T.entryId && T.entries.some(e => e.id === T.entryId)) openEntry(T.entryId);
+  else document.getElementById("entry-editor").innerHTML = `<p class="hint">Оберіть працівника зі списку.</p>`;
+}
+
+function entryName(e) { return e.teacher?.full_name || "Вакансія"; }
+
+function drawEntryList() {
+  const box = document.getElementById("entry-list");
+  if (!T.entries.length) { box.innerHTML = `<p class="hint">Список порожній.</p>`; return; }
+  const allHours = T.entries.reduce((a, e) =>
+    a + (Number(e.tot.h_1_4) || 0) + (Number(e.tot.h_5_9) || 0) + (Number(e.tot.h_10_12) || 0), 0);
+  box.innerHTML = T.entries.map(e => {
+    const h = (Number(e.tot.h_1_4) || 0) + (Number(e.tot.h_5_9) || 0) + (Number(e.tot.h_10_12) || 0);
+    const meta = [e.category, h ? fmtUa(h) + " год" : null,
+                  e.employment !== "основний" ? e.employment : null].filter(Boolean).join(" · ");
+    return `<div class="entry-item ${e.id === T.entryId ? "sel" : ""}" onclick="openEntry(${e.id})">
+      <span class="no">${e.row_no}</span>
+      <span>${esc(entryName(e))}<br><span class="meta">${esc(meta)}</span></span>
+      <span class="meta">${e.tot.grand_total ? money(e.tot.grand_total) : ""}</span>
+    </div>`;
+  }).join("") + `<p class="hint" style="padding:8px 10px;">Усього: ${T.entries.length} осіб, ${fmtUa(allHours)} год/тиждень</p>`;
+}
+
+function openAddEntry() {
+  const used = new Set(T.entries.map(e => e.teacher_id));
+  const free = T.teachers.filter(t => t.is_active !== false && !used.has(t.id));
+  document.getElementById("add-entry-box").innerHTML = `
+    <div class="edu-box" style="margin-bottom:10px;">
+      <label style="margin-top:0;">Працівник з реєстру</label>
+      <select id="ae-teacher">
+        ${free.map(t => `<option value="${t.id}">${esc(t.full_name)}</option>`).join("")}
+        <option value="vacancy">— вакансія —</option>
+      </select>
+      <label>або новий (ПІБ)</label>
+      <input id="ae-new" placeholder="Прізвище Ім'я По батькові">
+      <button class="primary" style="margin-top:10px;" onclick="addEntry()">Додати</button>
+      <button class="icon-btn" onclick="document.getElementById('add-entry-box').innerHTML=''">Скасувати</button>
+    </div>`;
+}
+
+async function addEntry() {
+  const newName = document.getElementById("ae-new").value.trim();
+  let teacherId = document.getElementById("ae-teacher").value;
+  let t = null;
+  if (newName) {
+    const created = await insertRows("teacher", [{ full_name: newName }]);
+    if (!created) return;
+    t = created[0];
+    T.teachers.push({ ...t, is_active: true });
+    teacherId = t.id;
+  } else if (teacherId !== "vacancy") {
+    teacherId = Number(teacherId);
+    t = T.teachers.find(x => x.id === teacherId);
+  }
+  const rowNo = Math.max(0, ...T.entries.map(e => e.row_no)) + 1;
+  const row = teacherId === "vacancy"
+    ? { period_id: T.period.id, teacher_id: null, row_no: rowNo, employment: "вакансія" }
+    : { period_id: T.period.id, teacher_id: teacherId, row_no: rowNo,
+        category: t?.category || null, ped_title: t?.ped_title || null };
+  const res = await insertRows("tariff_entry", [row]);
+  if (!res) return;
+  document.getElementById("add-entry-box").innerHTML = "";
+  T.entryId = res[0].id;
+  loadEntries();
+}
+
+// ------------------------------------------------------------------
+//  10.6 Картка працівника: рядки, підвищення, доплати, суми
+// ------------------------------------------------------------------
+let entryData = null;   // { entry, lines, calc, sups, total }
+
+async function openEntry(id) {
+  T.entryId = id;
+  document.querySelectorAll(".entry-item").forEach(el =>
+    el.classList.toggle("sel", el.getAttribute("onclick") === `openEntry(${id})`));
+  const box = document.getElementById("entry-editor");
+  box.innerHTML = `<div class="loading">Завантаження…</div>`;
+
+  const [lines, calc, sups, tot] = await Promise.all([
+    sb.from("tariff_line").select("*, tariff_line_raise(raise_type_id, pct), tariff_line_fin(*)")
+      .eq("entry_id", id).order("sort").order("id"),
+    sb.from("v_tariff_line_calc").select("*").eq("entry_id", id),
+    sb.from("tariff_supplement").select("*, tariff_supplement_fin(amount)").eq("entry_id", id).order("id"),
+    sb.from("v_tariff_entry_total").select("*").eq("entry_id", id).maybeSingle()
+  ]);
+  const e = [lines, calc, sups, tot].find(q => q.error);
+  if (e) { box.innerHTML = errBox(e.error.message); return; }
+
+  const one = x => Array.isArray(x) ? (x[0] || null) : x;   // 1:1 зв'язок може прийти масивом
+  entryData = {
+    entry: T.entries.find(x => x.id === id),
+    lines: lines.data.map(l => ({ ...l, fin: one(l.tariff_line_fin) || {} })),
+    calc: Object.fromEntries(calc.data.map(c => [c.line_id, c])),
+    sups: sups.data.map(s => ({ ...s, amount: one(s.tariff_supplement_fin)?.amount ?? null })),
+    total: tot.data || {}
+  };
+  drawEntryEditor();
+}
+
+function lineLabel(l) {
+  if (l.kind === "position") return `${l.position_name}, ${fmtUa(l.rate_fraction)} ст.`;
+  const band = T.bands.find(b => b.code === l.band_code);
+  return `${band ? band.label : ""} · ${fmtUa(l.hours)} год`;
+}
+
+function drawEntryEditor() {
+  const { entry: en, lines, calc, sups } = entryData;
+  const dep = dis(canDep()), acc = dis(canAcc());
+  const bandOpts = sel => T.bands.map(b =>
+    `<option value="${b.code}" ${b.code === sel ? "selected" : ""}>${b.label}</option>`).join("");
+
+  // --- Шапка працівника ---
+  let html = `
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;">
+      <h2 style="margin:0;">${esc(entryName(en))}</h2>
+      ${canDep() ? `<button class="icon-btn" onclick="deleteEntry()">Вилучити з тарифікації</button>` : ""}
+    </div>
+    <div class="grid2">
+      <div><label>№ п/п (графа 1) ${q(1)}</label><input value="${en.row_no}" ${dep}
+           onchange="saveEntryField('row_no', this, 'int')"></div>
+      <div><label>Тип зайнятості</label><select ${dep} onchange="saveEntryField('employment', this, 'text')">
+           ${EMPLOYMENT.map(x => `<option ${x === en.employment ? "selected" : ""}>${x}</option>`).join("")}</select></div>
+      <div><label>Категорія (на дату тарифікації) ${qt("Потрапляє в графу 3. Береться з реєстру при додаванні, але тут можна змінити саме для цієї тарифікації.")}</label><select ${dep} onchange="saveEntryField('category', this, 'text')">
+           <option value=""></option>
+           ${CATEGORIES.map(x => `<option ${x === en.category ? "selected" : ""}>${x}</option>`).join("")}</select></div>
+      <div><label>Звання</label><input list="dl-titles" value="${esc(en.ped_title || "")}" ${dep}
+           onchange="saveEntryField('ped_title', this, 'text')"></div>
+    </div>
+    <label>Примітка</label><input value="${esc(en.note || "")}" ${dep} onchange="saveEntryField('note', this, 'text')">
+    <datalist id="dl-titles">${TITLES.map(x => `<option value="${x}">`).join("")}</datalist>
+    <datalist id="dl-pos">${POSITIONS.map(x => `<option value="${x}">`).join("")}</datalist>`;
+
+  // --- Рядки: посади та години (зона заступника) ---
+  html += `<div class="sec-title">Посади та години (графи 3, 9–11, 15–17, підвищення графи 7)</div>
+    <div style="overflow-x:auto;"><table class="tt">
+    <thead><tr><th>Посада ${q(3)}</th><th>Предмети ${q(3)}</th><th>Класи / ставка ${qt("Для годин — група класів (графи 9–11). Для посади — частка ставки (0,5; 1), з неї рахується графа 24.")}</th><th>Год/тиж ${q(9)}</th>
+      <th title="Скільки з цих годин дають доплату за перевірку зошитів">Зошити: год</th><th>Зошити: % ${q(15)}</th>
+      <th>Норма ${qt("Скільки тижневих годин становить одну ставку (для вчителів — 18).")}</th><th>Підвищення ставки, % ${q(7)}</th><th></th></tr></thead><tbody>`;
+  for (const l of lines) {
+    const used = new Set(l.tariff_line_raise.map(r => r.raise_type_id));
+    const chips = l.tariff_line_raise.map(r => {
+      const rt = T.raiseTypes.find(x => x.id === r.raise_type_id);
+      return `<span class="raise-chip" title="${esc(rt?.name)}">${esc(shortRaise(rt?.name))}
+        <input value="${inVal(r.pct)}" ${dep} onchange="saveRaise(${l.id}, ${r.raise_type_id}, this)">
+        ${canDep() ? `<button class="x-btn" onclick="deleteRaise(${l.id}, ${r.raise_type_id})">×</button>` : ""}</span>`;
+    }).join("");
+    const addRaise = canDep() && T.raiseTypes.some(rt => !used.has(rt.id))
+      ? `<select style="width:auto;font-size:12px;padding:1px 4px;" onchange="addRaise(${l.id}, this)">
+           <option value="">+ підвищення</option>
+           ${T.raiseTypes.filter(rt => !used.has(rt.id)).map(rt => `<option value="${rt.id}">${esc(rt.name)}</option>`).join("")}
+         </select>` : "";
+    const isT = l.kind === "teaching";
+    html += `<tr>
+      <td style="min-width:150px;"><input list="dl-pos" value="${esc(l.position_name)}" ${dep} onchange="saveLine(${l.id}, 'position_name', this, 'text')"></td>
+      <td style="min-width:170px;"><input value="${esc(l.subjects || "")}" ${dep} onchange="saveLine(${l.id}, 'subjects', this, 'text')"></td>
+      <td>${isT
+        ? `<select style="min-width:110px;" ${dep} onchange="saveLine(${l.id}, 'band_code', this, 'text')">${bandOpts(l.band_code)}</select>`
+        : `<input class="n-s" value="${inVal(l.rate_fraction)}" ${dep} onchange="saveLine(${l.id}, 'rate_fraction', this, 'num')"><span class="hint"> ст.</span>`}</td>
+      <td>${isT ? `<input class="n-s" value="${inVal(l.hours)}" ${dep} onchange="saveLine(${l.id}, 'hours', this, 'num')">` : ""}</td>
+      <td>${isT ? `<input class="n-s" value="${inVal(l.notebook_hours)}" ${dep} onchange="saveLine(${l.id}, 'notebook_hours', this, 'num')">` : ""}</td>
+      <td>${isT ? `<input class="n-s" value="${inVal(l.notebook_pct)}" ${dep} onchange="saveLine(${l.id}, 'notebook_pct', this, 'num')">` : ""}</td>
+      <td>${isT ? `<input class="n-s" value="${inVal(l.hours_norm)}" ${dep} onchange="saveLine(${l.id}, 'hours_norm', this, 'num')">` : ""}</td>
+      <td style="min-width:180px;">${chips}${addRaise}</td>
+      <td>${canDep() ? `<button class="x-btn" title="Видалити рядок" onclick="deleteLine(${l.id})">×</button>` : ""}</td>
+    </tr>`;
+  }
+  html += `</tbody></table></div>`;
+  if (canDep()) html += `<div style="margin-top:6px;">
+      <button class="icon-btn" onclick="addLine('teaching')">+ години</button>
+      <button class="icon-btn" onclick="addLine('position')">+ посада зі ставкою</button></div>`;
+
+  // --- Ставки й суми (зона бухгалтера) ---
+  html += `<div class="sec-title">Ставки й суми — заповнює бухгалтер (графи 5–8, 12–17, 24)</div>
+    <p class="hint">Порожнє поле в колонках «вручну» — сума рахується автоматично; вписане значення має пріоритет.</p>
+    <div style="overflow-x:auto;"><table class="tt">
+    <thead><tr><th>Рядок</th>
+      <th class="zone-fin">Гр. 5 Тарифний розряд ${q(5)}</th><th class="zone-fin">Гр. 6 Ставка ${q(6)}</th>
+      <th>Гр. 7 Підвищ. ${q(7)}</th><th>Гр. 8 Ставка з підвищ. ${q(8)}</th><th class="zone-fin">Гр. 8 вручну</th>
+      <th>Зарплата</th><th class="zone-fin">вручну</th><th>Зошити</th><th class="zone-fin">вручну</th></tr></thead><tbody>`;
+  for (const l of lines) {
+    const c = calc[l.id] || {}, f = l.fin;
+    const salary = l.kind === "teaching" ? c.teaching_salary : c.position_salary;
+    html += `<tr>
+      <td style="min-width:150px;">${esc(lineLabel(l))}</td>
+      <td class="zone-fin"><input class="n" value="${esc(f.tariff_grade || "")}" ${acc} onchange="saveFin(${l.id}, 'tariff_grade', this, 'text')"></td>
+      <td class="zone-fin"><input class="n" value="${inVal(f.base_rate)}" ${acc} onchange="saveFin(${l.id}, 'base_rate', this, 'num')"></td>
+      <td class="calc" id="c7-${l.id}">${fmtUa(c.raise_pct || 0)}% · ${money(c.raise_amount)}</td>
+      <td class="calc" id="c8-${l.id}"><b>${money(c.rate_total)}</b></td>
+      <td class="zone-fin"><input class="n" value="${inVal(f.rate_override)}" ${acc} onchange="saveFin(${l.id}, 'rate_override', this, 'num')"></td>
+      <td class="calc" id="cs-${l.id}"><b>${money(salary)}</b></td>
+      <td class="zone-fin"><input class="n" value="${inVal(f.salary_override)}" ${acc} onchange="saveFin(${l.id}, 'salary_override', this, 'num')"></td>
+      <td class="calc" id="cn-${l.id}">${l.kind === "teaching" ? money(c.notebook_amount) : ""}</td>
+      <td class="zone-fin">${l.kind === "teaching" ? `<input class="n" value="${inVal(f.notebook_override)}" ${acc} onchange="saveFin(${l.id}, 'notebook_override', this, 'num')">` : ""}</td>
+    </tr>`;
+  }
+  html += `</tbody></table></div>`;
+
+  // --- Доплати (графи 19–23, 25) ---
+  html += `<div class="sec-title">Доплати й надбавки (графи 19–23, 25)</div>
+    <div style="overflow-x:auto;"><table class="tt">
+    <thead><tr><th>Вид (графа) ${qt("Вид доплати визначає графу форми: 19–23 — додаткова оплата, 25 — інші доплати (вислуга, престижність).")}</th><th>%</th><th>Год</th><th>Примітка ${qt("Що потрапить у пояснення: клас для класного керівництва, стаж для вислуги тощо.")}</th>
+      <th class="zone-fin">Сума на місяць</th><th></th></tr></thead><tbody>`;
+  for (const s of sups) {
+    html += `<tr>
+      <td><select ${dep} onchange="saveSup(${s.id}, 'type_id', this, 'int')">
+        ${T.supTypes.map(t => `<option value="${t.id}" ${t.id === s.type_id ? "selected" : ""}>гр. ${t.form_column} · ${esc(t.name)}</option>`).join("")}
+      </select></td>
+      <td><input class="n-s" value="${inVal(s.pct)}" ${dep} onchange="saveSup(${s.id}, 'pct', this, 'num')"></td>
+      <td><input class="n-s" value="${inVal(s.hours)}" ${dep} onchange="saveSup(${s.id}, 'hours', this, 'num')"></td>
+      <td><input value="${esc(s.note || "")}" ${dep} ${canDep() ? 'placeholder="10-А, стаж 31 р."' : ""} onchange="saveSup(${s.id}, 'note', this, 'text')"></td>
+      <td class="zone-fin"><input class="n" value="${inVal(s.amount)}" ${acc} onchange="saveSupAmount(${s.id}, this)"></td>
+      <td>${canDep() ? `<button class="x-btn" onclick="deleteSup(${s.id})">×</button>` : ""}</td>
+    </tr>`;
+  }
+  html += `</tbody></table></div>`;
+  if (canDep()) html += `<select style="width:auto;margin-top:6px;" onchange="addSup(this)">
+      <option value="">+ доплата / надбавка</option>
+      ${T.supTypes.map(t => `<option value="${t.id}">гр. ${t.form_column} · ${esc(t.name)}</option>`).join("")}
+    </select>`;
+
+  html += `<div class="sec-title">Підсумок за формою</div><div class="totals-row" id="entry-totals"></div>`;
+  document.getElementById("entry-editor").innerHTML = html;
+  drawEntryTotals();
+}
+
+function shortRaise(name) {
+  return String(name || "").replace("Звання ", "").replace(/[«»]/g, "")
+    .replace("Науковий ступінь кандидата наук", "канд. наук").replace("Інше підвищення", "інше");
+}
+
+function drawEntryTotals() {
+  const box = document.getElementById("entry-totals");
+  if (!box) return;   // картку саме перемальовують — підсумок намалюється разом із нею
+  const t = entryData.total || {};
+  const item = (g, label, v, isMoney = true) =>
+    `<span>гр. ${g} ${label}: <b>${isMoney ? money(v) : fmtUa(v || 0)}</b></span>`;
+  box.innerHTML = [
+    item("9–11", "години", (Number(t.h_1_4) || 0) + (Number(t.h_5_9) || 0) + (Number(t.h_10_12) || 0), false),
+    item(18, "педагогічна зарплата", t.ped_total),
+    item("19–23", "додаткова оплата",
+      ["c19", "c20", "c21", "c22", "c23"].reduce((a, k) => a + (Number(t[k]) || 0), 0)),
+    item(24, "оклад", t.c24),
+    item(25, "інші доплати", t.c25),
+    item(26, "всього", t.grand_total)
+  ].join("");
+}
+
+// Перерахунок після зміни годин/ставок: оновлюємо лише розрахункові клітинки
+async function refreshEntryCalc() {
+  const id = T.entryId;
+  const [calc, tot] = await Promise.all([
+    sb.from("v_tariff_line_calc").select("*").eq("entry_id", id),
+    sb.from("v_tariff_entry_total").select("*").eq("entry_id", id).maybeSingle()
+  ]);
+  if (calc.error || tot.error || T.entryId !== id || !entryData) return;   // уже відкрито іншу картку
+  for (const c of calc.data) {
+    entryData.calc[c.line_id] = c;
+    const l = entryData.lines.find(x => x.id === c.line_id);
+    const salary = l?.kind === "teaching" ? c.teaching_salary : c.position_salary;
+    const set = (pfx, html) => { const el = document.getElementById(pfx + c.line_id); if (el) el.innerHTML = html; };
+    set("c7-", `${fmtUa(c.raise_pct || 0)}% · ${money(c.raise_amount)}`);
+    set("c8-", `<b>${money(c.rate_total)}</b>`);
+    set("cs-", `<b>${money(salary)}</b>`);
+    if (l?.kind === "teaching") set("cn-", money(c.notebook_amount));
+  }
+  entryData.total = tot.data || {};
+  drawEntryTotals();
+  // оновити суму в списку зліва
+  const en = T.entries.find(e => e.id === id);
+  if (en) { en.tot = entryData.total; drawEntryList(); }
+}
+
+// ---------- збереження полів картки ----------
+async function saveEntryField(field, el, type) {
+  const v = readVal(el, type);
+  if (!checkVal(v, el, { required: field === "row_no" || field === "employment" })) return;
+  if (await saveRow("tariff_entry", { id: T.entryId }, { [field]: v }, el)) {
+    const en = T.entries.find(e => e.id === T.entryId);
+    en[field] = v;
+    if (field === "row_no") { T.entries.sort((a, b) => a.row_no - b.row_no); }
+    drawEntryList();
+  }
+}
+
+async function deleteEntry() {
+  if (!confirm("Вилучити працівника з цієї тарифікації разом з усіма його рядками й доплатами?")) return;
+  if (await deleteRows("tariff_entry", { id: T.entryId })) { T.entryId = null; loadEntries(); }
+}
+
+async function addLine(kind) {
+  const maxSort = Math.max(0, ...entryData.lines.map(l => l.sort));
+  const row = kind === "teaching"
+    ? { entry_id: T.entryId, sort: maxSort + 1, kind, position_name: "вчитель", band_code: "5-9", hours: 0 }
+    : { entry_id: T.entryId, sort: maxSort + 1, kind, position_name: "заступник директора", rate_fraction: 0.5 };
+  if (await insertRows("tariff_line", [row])) openEntry(T.entryId);
+}
+
+async function deleteLine(id) {
+  if (!confirm("Видалити цей рядок?")) return;
+  if (await deleteRows("tariff_line", { id })) openEntry(T.entryId);
+}
+
+async function saveLine(id, field, el, type) {
+  const v = readVal(el, type);
+  const isHours = ["hours", "notebook_hours"].includes(field);
+  if (!checkVal(v, el, { step05: isHours, required: ["hours", "rate_fraction", "hours_norm", "position_name", "band_code"].includes(field) })) return;
+  if (await saveRow("tariff_line", { id }, { [field]: v }, el)) {
+    const l = entryData.lines.find(x => x.id === id);
+    l[field] = v;
+    // оновити підпис рядка в таблиці бухгалтера
+    if (["band_code", "hours", "rate_fraction", "position_name"].includes(field)) drawEntryEditor();
+    refreshEntryCalc();
+  } else {
+    openEntry(T.entryId);   // повернути збережене значення
+  }
+}
+
+async function addRaise(lineId, sel) {
+  const typeId = Number(sel.value);
+  if (!typeId) return;
+  const rt = T.raiseTypes.find(x => x.id === typeId);
+  if (await insertRows("tariff_line_raise", [{ line_id: lineId, raise_type_id: typeId, pct: rt?.default_pct ?? 0 }]))
+    openEntry(T.entryId);
+}
+async function saveRaise(lineId, typeId, el) {
+  const v = readVal(el, "num");
+  if (!checkVal(v, el, { required: true })) return;
+  if (await saveRow("tariff_line_raise", { line_id: lineId, raise_type_id: typeId }, { pct: v }, el)) refreshEntryCalc();
+}
+async function deleteRaise(lineId, typeId) {
+  if (await deleteRows("tariff_line_raise", { line_id: lineId, raise_type_id: typeId })) openEntry(T.entryId);
+}
+
+async function saveFin(lineId, field, el, type) {
+  const v = readVal(el, type);
+  if (!checkVal(v, el)) return;
+  if (await upsertRow("tariff_line_fin", { line_id: lineId, [field]: v }, "line_id", el)) {
+    const l = entryData.lines.find(x => x.id === lineId);
+    l.fin[field] = v;
+    refreshEntryCalc();
+  }
+}
+
+async function addSup(sel) {
+  const typeId = Number(sel.value);
+  if (!typeId) return;
+  const st = T.supTypes.find(x => x.id === typeId);
+  if (await insertRows("tariff_supplement", [{ entry_id: T.entryId, type_id: typeId, pct: st?.default_pct ?? null }]))
+    openEntry(T.entryId);
+}
+async function saveSup(id, field, el, type) {
+  const v = readVal(el, type);
+  if (!checkVal(v, el, { step05: field === "hours", required: field === "type_id" })) return;
+  if (await saveRow("tariff_supplement", { id }, { [field]: v }, el)) {
+    entryData.sups.find(s => s.id === id)[field] = v;
+    if (field === "type_id") refreshEntryCalc();   // доплата могла перейти в іншу графу
+  }
+}
+async function saveSupAmount(id, el) {
+  const v = readVal(el, "num");
+  if (!checkVal(v, el)) return;
+  if (await upsertRow("tariff_supplement_fin", { supplement_id: id, amount: v }, "supplement_id", el)) refreshEntryCalc();
+}
+async function deleteSup(id) {
+  if (!confirm("Видалити цю доплату?")) return;
+  if (await deleteRows("tariff_supplement", { id })) openEntry(T.entryId);
+}
+
+// ------------------------------------------------------------------
+//  10.8 Експорт у Excel за формою Додатка 1 (наказ МО №102 від 15.04.1993)
+//  Аркуш 1 — титул і показники; аркуш 2 — тарифікаційний список, 26 граф.
+//  Кожен працівник — блок рядків: по рядку на кожну посаду / групу годин.
+// ------------------------------------------------------------------
+const XL_FONT = "Times New Roman";
+const XL_THIN = { style: "thin" };
+const XL_BORDER = { top: XL_THIN, left: XL_THIN, bottom: XL_THIN, right: XL_THIN };
+const XL_MONEY = "#,##0.00";
+const XL_HOURS = "General";   // 8 і 8,5 без зайвого ",0"
+
+async function exportTariffXlsx() {
+  if (!T.period) { alert("Оберіть тарифікацію."); return; }
+  if (typeof ExcelJS === "undefined") { alert("Бібліотека ExcelJS не завантажилась. Перевірте інтернет."); return; }
+  const btn = document.getElementById("btn-export");
+  const label = btn.textContent;
+  btn.disabled = true; btn.textContent = "Формуємо…";
+  try {
+    const data = await loadExportData(T.period.id);
+    const wb = new ExcelJS.Workbook();
+    wb.creator = "admin_school";
+    buildTitleSheet(wb, T.period, data);
+    buildListSheet(wb, T.period, data);
+    const buf = await wb.xlsx.writeBuffer();
+    const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `Тарифікація_${T.period.on_date}.xlsx`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  } catch (e) {
+    console.error(e);
+    alert("Не вдалося сформувати файл: " + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = label;
+  }
+}
+
+async function loadExportData(pid) {
+  const q = await Promise.all([
+    sb.from("tariff_entry")
+      .select(`id, row_no, employment, category, ped_title, teacher_id, teacher:teacher_id(full_name),
+               tariff_line(*), tariff_supplement(*, supplement_type(name, form_column), tariff_supplement_fin(amount))`)
+      .eq("period_id", pid).order("row_no"),
+    sb.from("v_tariff_entry_total").select("*").eq("period_id", pid),
+    sb.from("tariff_indicator").select("*").eq("period_id", pid),
+    sb.from("tariff_indicator_value").select("*").eq("period_id", pid)
+  ]);
+  const err = q.find(x => x.error);
+  if (err) throw new Error(err.error.message);
+  const [ent, tot, ind, ext] = q.map(x => x.data);
+
+  const entryIds = ent.map(e => e.id);
+  const teacherIds = ent.map(e => e.teacher_id).filter(Boolean);
+  const [calc, edu] = await Promise.all([
+    entryIds.length ? sb.from("v_tariff_line_calc").select("*").in("entry_id", entryIds) : { data: [] },
+    teacherIds.length ? sb.from("teacher_education").select("*").in("teacher_id", teacherIds).order("sort").order("id") : { data: [] }
+  ]);
+  if (calc.error || edu.error) throw new Error((calc.error || edu.error).message);
+
+  return {
+    entries: ent.map(e => ({ ...e, tariff_line: (e.tariff_line || []).sort((a, b) => a.sort - b.sort || a.id - b.id) })),
+    totals: Object.fromEntries(tot.map(t => [t.entry_id, t])),
+    calc: Object.fromEntries(calc.data.map(c => [c.line_id, c])),
+    edu: edu.data,
+    ind, ext
+  };
+}
+
+// ---------- допоміжне для стилів ----------
+function xlCell(ws, addr, value, opt = {}) {
+  const c = ws.getCell(addr);
+  if (value !== undefined && value !== null && value !== "") c.value = value;
+  c.font = { name: XL_FONT, size: opt.size || 11, bold: !!opt.bold, italic: !!opt.italic,
+             color: opt.color ? { argb: opt.color } : undefined };
+  c.alignment = { horizontal: opt.h || "left", vertical: opt.v || "middle", wrapText: opt.wrap !== false, indent: opt.indent || 0 };
+  if (opt.border) c.border = XL_BORDER;
+  if (opt.fmt) c.numFmt = opt.fmt;
+  if (opt.fill) c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: opt.fill } };
+  return c;
+}
+const num0 = v => (v === null || v === undefined || v === "" ? null : Number(v));
+const nz = v => { const x = num0(v); return x ? x : null; };   // 0 -> порожня комірка
+
+// ================= Аркуш 1: титул і показники =================
+function buildTitleSheet(wb, p, d) {
+  const ws = wb.addWorksheet("Титул і показники", {
+    pageSetup: { paperSize: 8, orientation: "landscape", fitToPage: true, fitToWidth: 1, fitToHeight: 1,
+                 margins: { left: 0.6, right: 0.4, top: 0.5, bottom: 0.5, header: 0.2, footer: 0.2 } },
+    views: [{ showGridLines: false }]
+  });
+  ws.columns = [{ width: 8 }, { width: 84 }, { width: 22 }, { width: 22 }, { width: 24 }, { width: 22 }];   // під А3 альбомну
+
+  xlCell(ws, "D1", "Додаток № 1", { wrap: false });
+  xlCell(ws, "D2", "до Інструкції про порядок обчислення", { wrap: false });
+  xlCell(ws, "D3", "заробітної плати працівників освіти", { wrap: false });
+  xlCell(ws, "D4", "(наказ МО України від 15.04.1993 № 102)", { size: 9, italic: true, wrap: false });
+
+  const dateLine = iso => iso ? `«${iso.slice(8, 10)}» ${MONTHS_GEN[Number(iso.slice(5, 7)) - 1]} ${iso.slice(0, 4)} р.`
+                              : "«____» _______________ 20___ р.";
+  xlCell(ws, "B6", "ПОГОДЖЕНО", { bold: true, wrap: false });
+  xlCell(ws, "B7", p.agreed_position || "________________________________", { wrap: false });
+  xlCell(ws, "B8", p.agreed_name ? `____________ ${p.agreed_name}` : "________________________________", { wrap: false });
+  xlCell(ws, "B9", dateLine(p.agreed_date), { wrap: false });
+  xlCell(ws, "D6", "ЗАТВЕРДЖУЮ", { bold: true, wrap: false });
+  xlCell(ws, "D7", p.approved_position || "Директор", { wrap: false });
+  xlCell(ws, "D8", `____________ ${p.approved_name || ""}`, { wrap: false });
+  xlCell(ws, "D9", dateLine(p.approved_date), { wrap: false });
+
+  const center = (row, text, opt = {}) => { ws.mergeCells(`A${row}:F${row}`); xlCell(ws, `A${row}`, text, { h: "center", ...opt }); };
+  center(11, "Тарифікаційний список", { size: 14, bold: true });
+  center(12, "вчителів та інших працівників");
+  center(13, p.institution_name || "", { bold: true });
+  ws.getRow(13).height = 32;
+  center(14, `на ${dateUa(p.on_date)}`, { bold: true });
+  center(15, p.locality || "");
+  center(16, "(місто, район, село)", { size: 9, italic: true });
+
+  // --- таблиця показників
+  const HR = 18;
+  ["№ п/п", "Показники на початок навчального року", ...T.bands.map(b => b.label), "Разом"]
+    .forEach((t, i) => xlCell(ws, `${"ABCDEF"[i]}${HR}`, t, { bold: true, h: "center", border: true }));
+  ws.getRow(HR).height = 30;
+
+  const I = {}; d.ind.forEach(x => I[x.band_code] = x);
+  const { V, total, rows } = computeIndicators(d.ext);
+  const bands = T.bands.map(b => b.code);
+
+  let r = HR + 1;
+  const line = (no, text, vals, opt = {}) => {
+    xlCell(ws, `A${r}`, no, { h: "center", border: true });
+    xlCell(ws, `B${r}`, text, { border: true, italic: !!opt.italic, bold: !!opt.bold, indent: opt.indent || 0,
+                               h: opt.center ? "center" : "left" });
+    bands.forEach((code, k) => {
+      const v = vals ? vals(code) : null;
+      xlCell(ws, `${"CDE"[k]}${r}`, v === null || v === undefined ? null : v,
+             { h: "center", border: true, bold: !!opt.bold, fmt: opt.int ? "0" : XL_HOURS });
+    });
+    if (vals) {
+      const res = bands.reduce((a, c) => a + (Number(vals(c)) || 0), 0);
+      xlCell(ws, `F${r}`, res ? { formula: `SUM(C${r}:E${r})`, result: res } : null,
+             { h: "center", border: true, bold: true, fmt: opt.int ? "0" : XL_HOURS });
+    } else xlCell(ws, `F${r}`, null, { border: true });
+    if (String(text).length > 90) ws.getRow(r).height = 30;
+    r++;
+  };
+  line("1", "Число класів на 01 вересня", c => num0(I[c]?.classes_count), { int: true, center: true });
+  line("2", "Число класів-комплектів на 01 вересня", c => num0(I[c]?.class_sets_count), { int: true, center: true });
+  line("3", "Число учнів на 01 вересня", c => num0(I[c]?.students_count), { int: true, center: true, bold: true });
+  line("4", "Загальне число годин викладацької роботи в тиждень по тарифікації в тому числі:", null, { center: true });
+  for (const x of rows.filter(y => y.section === "part"))
+    line("", `${x.letter ? x.letter + " " : ""}${x.label}`, c => nz(V[x.id]?.[c]), { center: true });
+  line("", "всього", c => nz(total[c]), { center: true, bold: true });
+  line("", "з них:", null, { center: true });
+  for (const sec of ["release", "division"]) {
+    const list = rows.filter(y => y.section === sec);
+    if (!list.length) continue;
+    line("", SECTION_TITLE[sec], null, { center: true });
+    for (const x of list) line("", x.label, c => nz(V[x.id]?.[c]), { center: true });
+  }
+
+  r += 2;
+  xlCell(ws, `B${r}`, `Директор ____________ ${p.director_name || ""}`, { wrap: false });
+  xlCell(ws, `D${r}`, `Бухгалтер ____________ ${p.accountant_name || ""}`, { wrap: false });
+}
+
+// ================= Аркуш 2: тарифікаційний список =================
+function buildListSheet(wb, p, d) {
+  const ws = wb.addWorksheet("Тарифікаційний список", {
+    pageSetup: { paperSize: 8, orientation: "landscape", fitToPage: true, fitToWidth: 1, fitToHeight: 0,   // 8 = А3
+                 printTitlesRow: "1:3",
+                 margins: { left: 0.25, right: 0.25, top: 0.4, bottom: 0.4, header: 0.2, footer: 0.2 } },
+    views: [{ state: "frozen", xSplit: 2, ySplit: 3 }]
+  });
+  const widths = [5, 20, 40, 34, 10, 11, 11, 12, 8, 8, 8, 12, 12, 12, 10, 10, 10, 14, 12, 14, 13, 13, 14, 15, 13, 14];
+  ws.columns = widths.map(w => ({ width: w }));
+  const col = n => ws.getColumn(n).letter;
+
+  // --- шапка граф
+  const HEAD = {
+    1: "№ п/п", 2: "Прізвище, ім'я та по батькові", 3: "Посада, категорія, предмет, який викладається",
+    4: "Освіта", 5: "Тарифний розряд", 6: "Ставка на місяць", 7: "Розмір підвищень",
+    8: "Ставка на місяць з урахуванням підвищень", 18: "Всього педагогічна заробітна плата на місяць",
+    24: "Оклад (ставка) навчально-допоміжного, адміністративного та ін. персоналу",
+    25: "Інші доплати", 26: "Всього заробітна плата на місяць"
+  };
+  const GROUPS = [[9, 11, "Кількість годин в тиждень"], [12, 14, "Зарплата на місяць"],
+                  [15, 17, "Доплата за перевірку зошитів"], [19, 23, "Додаткова оплата за"]];
+  const SUB = {
+    19: "класне керівництво",
+    20: "завідування кабінетом, навчально-дослідною ділянкою, виконання обов'язків майстра навчальної майстерні",
+    21: "керівництво гуртком, позакласну роботу з фізичного виховання, бібліотечну роботу",
+    22: "книжковий фонд шкільних підручників, організацію трудового навчання, професійну орієнтацію учнів",
+    23: "керівництво школою, групами продовженого дня, НКП, інтернатом при школі, ведення діловодства і бухобліку"
+  };
+  const BANDS = T.bands.map(b => b.label);
+  for (let c = 1; c <= 26; c++) {
+    for (let rr = 1; rr <= 3; rr++) xlCell(ws, `${col(c)}${rr}`, null, { h: "center", border: true, size: 10 });
+    ws.getCell(`${col(c)}3`).value = c;
+    ws.getCell(`${col(c)}3`).font = { name: XL_FONT, size: 10, bold: true };
+  }
+  for (const [c, t] of Object.entries(HEAD)) {
+    ws.getCell(`${col(+c)}1`).value = t;
+    ws.mergeCells(`${col(+c)}1:${col(+c)}2`);
+  }
+  for (const [a, b, t] of GROUPS) {
+    ws.getCell(`${col(a)}1`).value = t;
+    ws.mergeCells(`${col(a)}1:${col(b)}1`);
+  }
+  [9, 12, 15].forEach(a => BANDS.forEach((t, k) => ws.getCell(`${col(a + k)}2`).value = t));
+  for (const [c, t] of Object.entries(SUB)) ws.getCell(`${col(+c)}2`).value = t;
+  ws.getRow(1).height = 40; ws.getRow(2).height = 140; ws.getRow(3).height = 15;
+
+  // --- тіло
+  const BAND_COL = Object.fromEntries(T.bands.map((b, i) => [b.code, i]));
+  const eduByTeacher = {};
+  d.edu.forEach(e => (eduByTeacher[e.teacher_id] ||= []).push(e));
+  let r = 4;
+  const firstRow = r;
+
+  for (const e of d.entries) {
+    const lines = e.tariff_line;
+    const nRows = Math.max(lines.length, 1);
+    const top = r, bottom = r + nRows - 1;
+    const t = d.totals[e.id] || {};
+
+    // графи на весь блок (об'єднані вертикально)
+    const nameText = (e.teacher?.full_name || "Вакансія").split(/\s+/).join("\n")
+      + (e.employment !== "основний" && e.employment !== "вакансія" ? `\n(${e.employment})` : "");
+    const eduText = (eduByTeacher[e.teacher_id] || []).map(x =>
+      [x.level + (x.specialty ? ` (${x.specialty})` : ""), x.diploma, x.grad_year ? `${x.grad_year} р.` : null]
+        .filter(Boolean).join("\n")).join("\n");
+    const sup = {}; const supNotes = {};
+    for (const s of e.tariff_supplement || []) {
+      const fc = s.supplement_type?.form_column;
+      const fin = Array.isArray(s.tariff_supplement_fin) ? s.tariff_supplement_fin[0] : s.tariff_supplement_fin;
+      sup[fc] = (sup[fc] || 0) + (Number(fin?.amount) || 0);
+      const note = [s.supplement_type?.name, s.pct != null ? `${fmtUa(s.pct)}%` : null,
+                    s.hours != null ? `${fmtUa(s.hours)} год` : null, s.note].filter(Boolean).join(", ");
+      (supNotes[fc] ||= []).push(note);
+    }
+    const blockVals = {
+      1: e.row_no, 2: nameText, 4: eduText,
+      18: nz(t.ped_total), 19: nz(sup[19]), 20: nz(sup[20]), 21: nz(sup[21]), 22: nz(sup[22]), 23: nz(sup[23]),
+      25: nz(sup[25]), 26: nz(t.grand_total)
+    };
+    for (const [c, v] of Object.entries(blockVals)) {
+      const cn = +c;
+      const cell = xlCell(ws, `${col(cn)}${top}`, v, {
+        h: cn === 4 || cn === 2 ? "center" : (cn >= 18 ? "right" : "center"),
+        bold: cn === 2, size: cn === 4 ? 10 : 11, fmt: cn >= 18 ? XL_MONEY : undefined, border: true });
+      if (supNotes[cn]) cell.note = supNotes[cn].join("\n");   // що саме нараховано — у примітці до комірки
+      if (nRows > 1) ws.mergeCells(`${col(cn)}${top}:${col(cn)}${bottom}`);
+    }
+
+    // рядки посад і годин
+    lines.forEach((l, k) => {
+      const row = top + k;
+      const c = d.calc[l.id] || {};
+      const head = k === 0 ? [e.category, e.ped_title].filter(Boolean).join(", ") : "";
+      const what = l.kind === "position"
+        ? `${l.position_name}; ${fmtUa(l.rate_fraction)} ставки`
+        : `${l.position_name}${l.subjects ? " " + l.subjects : ""}`;
+      xlCell(ws, `C${row}`, head ? `${head};\n${what}` : what, { h: "center", border: true, size: 10,
+             bold: l.kind === "position" });
+      xlCell(ws, `E${row}`, l.kind ? (c.tariff_grade ?? null) : null, { h: "center", border: true });
+      xlCell(ws, `F${row}`, num0(c.base_rate), { h: "right", border: true, fmt: XL_MONEY });
+      xlCell(ws, `G${row}`, nz(c.raise_amount), { h: "right", border: true, fmt: XL_MONEY });
+      xlCell(ws, `H${row}`, c.base_rate != null || c.rate_total != null ? num0(c.rate_total) : null,
+             { h: "right", border: true, fmt: XL_MONEY });
+      for (let b = 0; b < 3; b++) {
+        const isBand = l.kind === "teaching" && BAND_COL[l.band_code] === b;
+        xlCell(ws, `${col(9 + b)}${row}`, isBand ? num0(l.hours) : null, { h: "center", border: true, fmt: XL_HOURS });
+        xlCell(ws, `${col(12 + b)}${row}`, isBand ? num0(c.teaching_salary) : null, { h: "right", border: true, fmt: XL_MONEY });
+        xlCell(ws, `${col(15 + b)}${row}`, isBand ? nz(c.notebook_amount) : null, { h: "right", border: true, fmt: XL_MONEY });
+      }
+      xlCell(ws, `X${row}`, l.kind === "position" ? num0(c.position_salary) : null, { h: "right", border: true, fmt: XL_MONEY });
+      if (l.kind === "teaching" && l.notebook_hours && l.notebook_pct) {
+        ws.getCell(`${col(15 + BAND_COL[l.band_code])}${row}`).note =
+          `${fmtUa(l.notebook_hours)} год × ${fmtUa(l.notebook_pct)}%`;
+      }
+    });
+    if (!lines.length) {
+      xlCell(ws, `C${top}`, [e.category, e.ped_title].filter(Boolean).join(", "), { h: "center", border: true });
+      for (const cn of [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 24]) xlCell(ws, `${col(cn)}${top}`, null, { border: true });
+    }
+    for (let rr = top; rr <= bottom; rr++) ws.getRow(rr).height = nRows === 1 ? 48 : Math.max(24, 15 * 3 / nRows * 1.2);
+    // товстіша лінія між працівниками
+    for (let cn = 1; cn <= 26; cn++) {
+      const cell = ws.getCell(`${col(cn)}${bottom}`);
+      cell.border = { ...cell.border, bottom: { style: "medium" } };
+    }
+    r = bottom + 1;
+  }
+
+  // --- підсумок
+  const last = r - 1;
+  xlCell(ws, `B${r}`, "Разом", { bold: true, border: true });
+  for (let cn = 1; cn <= 26; cn++) {
+    if (cn === 2) continue;
+    if (cn < 9 || cn === 1) { xlCell(ws, `${col(cn)}${r}`, null, { border: true }); continue; }
+    let res = 0;
+    for (let rr = firstRow; rr <= last; rr++) {
+      const cell = ws.getCell(`${col(cn)}${rr}`);
+      if (cell.isMerged && cell.master !== cell) continue;     // підлеглі комірки об'єднання повертають значення головної
+      if (typeof cell.value === "number") res += cell.value;
+    }
+    xlCell(ws, `${col(cn)}${r}`, { formula: `SUM(${col(cn)}${firstRow}:${col(cn)}${last})`, result: Math.round(res * 100) / 100 },
+           { h: cn <= 11 ? "center" : "right", bold: true, border: true, fmt: cn <= 11 ? XL_HOURS : XL_MONEY });
+  }
+  ws.getRow(r).height = 22;
+
+  r += 3;
+  xlCell(ws, `C${r}`, `Директор ____________ ${p.director_name || ""}`, { wrap: false, size: 12 });
+  xlCell(ws, `R${r}`, `Бухгалтер ____________ ${p.accountant_name || ""}`, { wrap: false, size: 12 });
+  ws.pageSetup.printArea = `A1:Z${r}`;
+}
+
+// ------------------------------------------------------------------
+//  10.9 Майстер: кроки, підказки до граф, перевірки, крок «Ставки», крок «Excel», довідка
+// ------------------------------------------------------------------
+const STEPS = ["req", "ind", "ent", "fin", "chk", "exp"];
+const STEP_TITLE = { req: "Реквізити", ind: "Показники", ent: "Працівники", fin: "Ставки й суми",
+                     chk: "Перевірка", exp: "Excel" };
+
+// Підказки до граф форми: що це, хто заповнює, звідки береться
+const HINTS = {
+  1: "Графа 1. Порядковий номер працівника у списку. Заповнює заступник.",
+  2: "Графа 2. Прізвище, ім'я, по батькові — з реєстру працівників.",
+  3: "Графа 3. Посада, категорія, звання, предмети. Складається автоматично з категорії/звання працівника та його рядків посад і годин.",
+  4: "Графа 4. Освіта: рівень, спеціальність, диплом, рік. Вноситься в «Реєстрі працівників».",
+  5: "Графа 5. Тарифний розряд (або коефіцієнт посадового окладу, якщо так визначає чинна постанова). Заповнює бухгалтер.",
+  6: "Графа 6. Ставка (посадовий оклад) на місяць без підвищень. Заповнює бухгалтер.",
+  7: "Графа 7. Розмір підвищень ставки: за звання, науковий ступінь, особливі умови (примітка 2 до форми). Відсотки вносить заступник у рядку працівника, суму рахує програма.",
+  8: "Графа 8. Ставка з урахуванням підвищень = графа 6 + графа 7. Рахується автоматично; бухгалтер може вписати своє значення.",
+  9: "Графи 9–11. Тижневі години за трьома колонками (групами класів), назви яких задаються в «⚙ Налаштування форми». Вносить заступник у рядках «години».",
+  12: "Графи 12–14. Зарплата за години = ставка (гр. 8) ÷ норма годин на ставку × години. Рахується автоматично.",
+  15: "Графи 15–17. Доплата за перевірку зошитів = ставка ÷ норма × години із зошитами × %. Години й % вносить заступник.",
+  18: "Графа 18. Всього педагогічна зарплата = графи 12–17. Рахується автоматично.",
+  19: "Графа 19. Класне керівництво. Вид і % вносить заступник, суму — бухгалтер.",
+  20: "Графа 20. Завідування кабінетом, навчально-дослідною ділянкою, майстернею.",
+  21: "Графа 21. Керівництво гуртком, позакласна робота з фізвиховання, бібліотечна робота.",
+  22: "Графа 22. Книжковий фонд підручників, організація трудового навчання, профорієнтація.",
+  23: "Графа 23. Керівництво школою, групами продовженого дня, ведення діловодства тощо.",
+  24: "Графа 24. Оклад (ставка) адміністративного, навчально-допоміжного та іншого персоналу — рядки «посада зі ставкою». Рахується: ставка (гр. 8) × частка ставки.",
+  25: "Графа 25. Інші доплати: вислуга років, престижність та ін.",
+  26: "Графа 26. Всього заробітна плата на місяць = графи 18–25. Рахується автоматично."
+};
+const q = n => `<span class="q" title="${esc(HINTS[n] || n)}">?</span>`;
+const qt = text => `<span class="q" title="${esc(text)}">?</span>`;
+
+function switchSub(name) {
+  T.sub = name;
+  document.querySelectorAll("#tariff-steps button, #tariff-subtabs button")
+    .forEach(b => b.classList.toggle("active", b.dataset.sub === name));
+  for (const s of [...STEPS, "reg", "help", "cfg"])
+    document.getElementById("sub-" + s).classList.toggle("active", s === name);
+  renderSub();
+}
+
+function drawStepNav() {
+  const i = STEPS.indexOf(T.sub);
+  const nav = document.getElementById("step-nav");
+  if (i < 0 || !T.period) { nav.innerHTML = ""; return; }
+  nav.innerHTML =
+    (i > 0 ? `<button class="icon-btn" onclick="switchSub('${STEPS[i - 1]}')">← ${STEP_TITLE[STEPS[i - 1]]}</button>` : "<span></span>") +
+    (i < STEPS.length - 1 ? `<button class="primary" style="margin-top:0;" onclick="switchSub('${STEPS[i + 1]}')">Далі: ${STEP_TITLE[STEPS[i + 1]]} →</button>` : "");
+}
+
+function renderSub() {
+  drawStepNav();
+  if (T.sub === "reg") { renderRegistry(); return; }   // реєстр не залежить від знімка
+  if (T.sub === "help") { renderHelp(); return; }
+  if (T.sub === "cfg") { renderSettings(); return; }
+  const areas = { req: "req-area", ind: "ind-area", ent: "entry-list", fin: "fin-area", chk: "chk-area", exp: "exp-area" };
+  if (!T.period) {
+    document.getElementById(areas[T.sub]).innerHTML = `<p class="hint">Ще немає жодної тарифікації. ` +
+      (T.role === "deputy" ? "Створіть першу кнопкою «+ Нова тарифікація» вгорі." : "Її створює заступник директора.") +
+      ` Як почати — у розділі «? Як працювати».</p>`;
+    if (T.sub === "ent") document.getElementById("entry-editor").innerHTML = "";
+    return;
+  }
+  if (T.sub === "req") renderRequisites();
+  if (T.sub === "ind") renderIndicators();
+  if (T.sub === "ent") loadEntries();
+  if (T.sub === "fin") renderFinGrid();
+  if (T.sub === "chk") renderChecks();
+  if (T.sub === "exp") renderExportStep();
+  refreshStepBadges();
+}
+
+// ------------------------------------------------------------------
+//  Перевірки: збираємо всі зауваження по знімку
+//  level: err — завадить коректній формі; warn — варто перевірити
+// ------------------------------------------------------------------
+async function collectIssues() {
+  const p = T.period;
+  const d = await loadExportData(p.id);
+  const chk = await sb.from("v_tariff_hours_check").select("*").eq("period_id", p.id);
+  const issues = [];
+  const add = (step, level, text, entryId = null) => issues.push({ step, level, text, entryId });
+
+  // крок 1 — реквізити
+  if (!p.institution_name || p.institution_name.startsWith("(")) add("req", "err", "Не вказано назву закладу.");
+  if (!p.locality) add("req", "warn", "Не вказано населений пункт (рядок «місто, район, село»).");
+  if (!p.approved_name) add("req", "warn", "Не вказано, хто затверджує (ЗАТВЕРДЖУЮ — ПІБ).");
+  if (!p.director_name) add("req", "warn", "Не вказано ПІБ директора для підпису під таблицею.");
+  if (!p.accountant_name) add("req", "warn", "Не вказано ПІБ бухгалтера для підпису під таблицею.");
+
+  // крок 2 — показники
+  const ind = Object.fromEntries(d.ind.map(r => [r.band_code, r]));
+  const { total } = computeIndicators(d.ext);
+  const used = T.bands.filter(b => (chk.data || []).some(c => c.band_code === b.code && Number(c.staff_hours) > 0));
+  for (const b of used) {
+    const r = ind[b.code] || {};
+    if (r.classes_count == null) add("ind", "warn", `${b.label}: не вказано число класів.`);
+    if (r.students_count == null) add("ind", "warn", `${b.label}: не вказано число учнів.`);
+    if (!total[b.code]) add("ind", "warn", `${b.label}: не внесено годин у рядок 4 (а, б, в…).`);
+  }
+  for (const c of chk.data || []) {
+    if (!c.is_ok && Number(c.indicator_total)) {
+      add("ind", "err", `${c.label}: «всього» у показниках (${fmtUa(c.indicator_total)}) не дорівнює сумі годин працівників (${fmtUa(c.staff_hours)}).`);
+    }
+  }
+
+  // крок 3 — працівники; крок 4 — суми
+  const rowNos = {};
+  for (const e of d.entries) {
+    const name = e.teacher?.full_name || "Вакансія";
+    (rowNos[e.row_no] ||= []).push(name);
+    const lines = e.tariff_line;
+    if (!lines.length) add("ent", "err", `${name}: немає жодної посади чи годин.`, e.id);
+    if (!e.category && e.employment !== "вакансія") add("ent", "warn", `${name}: не вказано категорію (графа 3).`, e.id);
+    if (e.teacher_id && !d.edu.some(x => x.teacher_id === e.teacher_id))
+      add("ent", "warn", `${name}: не внесено освіту (графа 4) — додайте в «Реєстрі працівників».`, e.id);
+    const hours = lines.filter(l => l.kind === "teaching").reduce((a, l) => a + (Number(l.hours) || 0), 0);
+    if (hours > 36) add("ent", "warn", `${name}: ${fmtUa(hours)} год/тиждень — понад дві ставки, перевірте.`, e.id);
+    for (const l of lines) {
+      const c = d.calc[l.id] || {};
+      const what = l.kind === "position" ? l.position_name : `${l.position_name} ${l.subjects || ""} (${fmtUa(l.hours)} год)`;
+      if (l.kind === "teaching" && !Number(l.hours)) add("ent", "err", `${name}: рядок «${what}» без годин.`, e.id);
+      if (l.kind === "teaching" && !l.subjects) add("ent", "warn", `${name}: у рядку годин не вказано предмети (графа 3).`, e.id);
+      if ((l.notebook_hours != null) !== (l.notebook_pct != null))
+        add("ent", "warn", `${name}: доплата за зошити — вказано лише години або лише %.`, e.id);
+      if (c.base_rate == null && c.rate_total == null) add("fin", "err", `${name}: «${what}» — не вказано ставку (графа 6).`, e.id);
+      if (!c.tariff_grade) add("fin", "warn", `${name}: «${what}» — не вказано тарифний розряд (графа 5).`, e.id);
+    }
+    for (const s of e.tariff_supplement || []) {
+      const fin = Array.isArray(s.tariff_supplement_fin) ? s.tariff_supplement_fin[0] : s.tariff_supplement_fin;
+      if (fin?.amount == null) add("fin", "err", `${name}: доплата «${s.supplement_type?.name}» без суми.`, e.id);
+      if (s.pct == null && s.hours == null && !s.note)
+        add("ent", "warn", `${name}: доплата «${s.supplement_type?.name}» — не вказано ні %, ні годин, ні примітки.`, e.id);
+    }
+  }
+  for (const [no, names] of Object.entries(rowNos))
+    if (names.length > 1) add("ent", "err", `№ ${no} повторюється: ${names.join(", ")}.`);
+  if (!d.entries.length) add("ent", "err", "У тарифікації ще немає жодного працівника.");
+  return { issues, data: d };
+}
+
+async function refreshStepBadges() {
+  if (!T.period) { STEPS.forEach(s => setBadge(s, null)); return; }
+  try {
+    const { issues } = await collectIssues();
+    T.issues = issues;
+    for (const s of ["req", "ind", "ent", "fin"]) {
+      const mine = issues.filter(x => x.step === s);
+      const errs = mine.filter(x => x.level === "err").length;
+      setBadge(s, errs ? ["err", errs] : mine.length ? ["warn", mine.length] : ["ok", "✓"]);
+    }
+    const errs = issues.filter(x => x.level === "err").length;
+    setBadge("chk", errs ? ["err", errs] : issues.length ? ["warn", issues.length] : ["ok", "✓"]);
+    setBadge("exp", errs ? ["warn", "чернетка"] : ["ok", "готово"]);
+  } catch (e) { console.warn(e); }
+}
+function setBadge(step, v) {
+  const el = document.getElementById("sb-" + step);
+  if (!el) return;
+  el.className = "st-badge" + (v ? " " + v[0] : "");
+  el.textContent = v ? v[1] : "";
+}
+
+async function renderChecks() {
+  const area = document.getElementById("chk-area");
+  area.innerHTML = `<div class="loading">Перевіряємо…</div>`;
+  let res;
+  try { res = await collectIssues(); } catch (e) { area.innerHTML = errBox(e.message); return; }
+  const { issues } = res;
+  const errs = issues.filter(x => x.level === "err").length;
+  let html = `<h2>Перевірка ${qt("Програма перевіряє повноту даних і узгодженість сум. «Помилка» — форма буде неповною або неправильною; «увага» — варто подивитися, але це може бути нормою.")}</h2>`;
+  if (!issues.length) {
+    html += `<div class="msg ok" style="display:block">Зауважень немає. Можна формувати Excel (крок 6).</div>`;
+  } else {
+    html += `<p class="hint">${errs} помилок, ${issues.length - errs} попереджень. Натисніть «Виправити», щоб перейти до потрібного місця.</p>`;
+    for (const s of ["req", "ind", "ent", "fin"]) {
+      const mine = issues.filter(x => x.step === s).sort((a, b) => (a.level === "err" ? 0 : 1) - (b.level === "err" ? 0 : 1));
+      if (!mine.length) continue;
+      html += `<div class="sec-title">Крок ${STEPS.indexOf(s) + 1}. ${STEP_TITLE[s]}</div>`;
+      html += mine.map(x => `<div class="issue ${x.level}">
+          <span class="ic">${x.level === "err" ? "✕" : "!"}</span>
+          <span>${esc(x.text)}</span>
+          <button class="icon-btn" onclick="gotoIssue('${x.step}', ${x.entryId ?? "null"})">Виправити</button>
+        </div>`).join("");
+    }
+  }
+  area.innerHTML = html;
+}
+
+function gotoIssue(step, entryId) {
+  if (entryId && step === "ent") { T.entryId = entryId; }
+  switchSub(step);
+  if (entryId && step === "fin") {
+    setTimeout(() => document.getElementById("fin-e-" + entryId)?.scrollIntoView({ behavior: "smooth", block: "center" }), 600);
+  }
+}
+
+// ------------------------------------------------------------------
+//  Крок 4: Ставки й суми — одна таблиця на всіх (зручно бухгалтеру)
+// ------------------------------------------------------------------
+async function renderFinGrid() {
+  const area = document.getElementById("fin-area");
+  area.innerHTML = `<div class="loading">Завантаження…</div>`;
+  let d;
+  try { d = await loadExportData(T.period.id); } catch (e) { area.innerHTML = errBox(e.message); return; }
+  T.finData = d;
+  const acc = dis(canAcc());
+  let html = `<h2>Ставки й суми</h2>
+    <p class="hint">Заповнює бухгалтер. Порожні поля «вручну» означають автоматичний розрахунок за формою; вписане значення має пріоритет.
+    ${canAcc() ? "" : "<b>Редагувати може лише бухгалтер (поки тарифікація — чернетка).</b>"}</p>`;
+  if (canAcc()) html += `<button class="icon-btn" onclick="fillRatesByGrade()" title="Для рядків, де вказано розряд, але немає ставки, підставляє ставку з інших рядків з тим самим розрядом">
+      Підставити ставки за однаковим розрядом</button>`;
+  html += `<div style="overflow-x:auto;margin-top:10px;"><table class="tt">
+    <thead><tr><th>№</th><th>Працівник</th><th>Рядок</th>
+      <th class="zone-fin">Гр. 5 ${q(5)}</th><th class="zone-fin">Гр. 6 ${q(6)}</th>
+      <th>Гр. 7 ${q(7)}</th><th>Гр. 8 ${q(8)}</th><th class="zone-fin">гр. 8 вручну</th>
+      <th>Зарплата ${q(12)}</th><th class="zone-fin">вручну</th><th>Зошити ${q(15)}</th><th class="zone-fin">вручну</th></tr></thead><tbody>`;
+  for (const e of d.entries) {
+    const name = e.teacher?.full_name || "Вакансія";
+    e.tariff_line.forEach((l, k) => {
+      const c = d.calc[l.id] || {};
+      const salary = l.kind === "teaching" ? c.teaching_salary : c.position_salary;
+      html += `<tr ${k === 0 ? `id="fin-e-${e.id}" style="border-top:2px solid var(--line);"` : ""}>
+        <td>${k === 0 ? e.row_no : ""}</td>
+        <td style="min-width:150px;">${k === 0 ? esc(name) : ""}</td>
+        <td style="min-width:150px;">${esc(lineLabel(l))}</td>
+        <td class="zone-fin"><input class="n" value="${esc(c.tariff_grade ?? "")}" ${acc} onchange="saveFinGrid(${l.id}, 'tariff_grade', this, 'text')"></td>
+        <td class="zone-fin"><input class="n" value="${inVal(c.base_rate)}" ${acc} onchange="saveFinGrid(${l.id}, 'base_rate', this, 'num')"></td>
+        <td class="calc" id="g7-${l.id}">${fmtUa(c.raise_pct || 0)}% · ${money(c.raise_amount)}</td>
+        <td class="calc" id="g8-${l.id}"><b>${money(c.rate_total)}</b></td>
+        <td class="zone-fin"><input class="n" value="" data-ovr="rate_override" data-line="${l.id}" ${acc} onchange="saveFinGrid(${l.id}, 'rate_override', this, 'num')"></td>
+        <td class="calc" id="gs-${l.id}"><b>${money(salary)}</b></td>
+        <td class="zone-fin"><input class="n" value="" data-ovr="salary_override" data-line="${l.id}" ${acc} onchange="saveFinGrid(${l.id}, 'salary_override', this, 'num')"></td>
+        <td class="calc" id="gn-${l.id}">${l.kind === "teaching" ? money(c.notebook_amount) : ""}</td>
+        <td class="zone-fin">${l.kind === "teaching" ? `<input class="n" value="" data-ovr="notebook_override" data-line="${l.id}" ${acc} onchange="saveFinGrid(${l.id}, 'notebook_override', this, 'num')">` : ""}</td>
+      </tr>`;
+    });
+  }
+  html += `</tbody></table></div>`;
+
+  // доплати
+  html += `<div class="sec-title">Доплати й надбавки — суми (графи 19–23, 25)</div>
+    <div style="overflow-x:auto;"><table class="tt"><thead><tr><th>№</th><th>Працівник</th><th>Вид (графа)</th>
+      <th>%, год, примітка</th><th class="zone-fin">Сума на місяць</th></tr></thead><tbody>`;
+  let anySup = false;
+  for (const e of d.entries) {
+    for (const s of e.tariff_supplement || []) {
+      anySup = true;
+      const fin = Array.isArray(s.tariff_supplement_fin) ? s.tariff_supplement_fin[0] : s.tariff_supplement_fin;
+      const desc = [s.pct != null ? fmtUa(s.pct) + "%" : null, s.hours != null ? fmtUa(s.hours) + " год" : null, s.note]
+        .filter(Boolean).join(", ");
+      html += `<tr><td>${e.row_no}</td><td>${esc(e.teacher?.full_name || "Вакансія")}</td>
+        <td>гр. ${s.supplement_type?.form_column} · ${esc(s.supplement_type?.name)} ${q(s.supplement_type?.form_column)}</td>
+        <td>${esc(desc)}</td>
+        <td class="zone-fin"><input class="n" value="${inVal(fin?.amount)}" ${acc} onchange="saveSupAmountGrid(${s.id}, this)"></td></tr>`;
+    }
+  }
+  if (!anySup) html += `<tr><td colspan="5" class="hint">Доплат ще не внесено (крок 3).</td></tr>`;
+  html += `</tbody></table></div>`;
+  area.innerHTML = html;
+  await fillOverrides(d);
+}
+
+// значення ручних полів беремо прямо з tariff_line_fin
+async function fillOverrides(d) {
+  const ids = Object.keys(d.calc).map(Number);
+  if (!ids.length) return;
+  const { data } = await sb.from("tariff_line_fin").select("*").in("line_id", ids);
+  const fin = Object.fromEntries((data || []).map(f => [f.line_id, f]));
+  T.finData.lineFin = fin;
+  document.querySelectorAll("#fin-area input[data-ovr]").forEach(inp => {
+    const f = fin[inp.dataset.line];
+    inp.value = inVal(f?.[inp.dataset.ovr]);
+  });
+}
+
+async function saveFinGrid(lineId, field, el, type) {
+  const v = readVal(el, type);
+  if (!checkVal(v, el)) return;
+  if (!await upsertRow("tariff_line_fin", { line_id: lineId, [field]: v }, "line_id", el)) return;
+  const { data } = await sb.from("v_tariff_line_calc").select("*").eq("line_id", lineId).maybeSingle();
+  if (!data) return;
+  T.finData.calc[lineId] = data;
+  const set = (id, h) => { const x = document.getElementById(id); if (x) x.innerHTML = h; };
+  set("g7-" + lineId, `${fmtUa(data.raise_pct || 0)}% · ${money(data.raise_amount)}`);
+  set("g8-" + lineId, `<b>${money(data.rate_total)}</b>`);
+  set("gs-" + lineId, `<b>${money(data.kind === "teaching" ? data.teaching_salary : data.position_salary)}</b>`);
+  if (data.kind === "teaching") set("gn-" + lineId, money(data.notebook_amount));
+  refreshStepBadges();
+}
+async function saveSupAmountGrid(id, el) {
+  const v = readVal(el, "num");
+  if (!checkVal(v, el)) return;
+  if (await upsertRow("tariff_supplement_fin", { supplement_id: id, amount: v }, "supplement_id", el)) refreshStepBadges();
+}
+
+async function fillRatesByGrade() {
+  const d = T.finData;
+  const byGrade = {};
+  for (const c of Object.values(d.calc))
+    if (c.tariff_grade && c.base_rate != null) (byGrade[c.tariff_grade] ||= []).push(Number(c.base_rate));
+  const todo = Object.values(d.calc).filter(c => c.tariff_grade && c.base_rate == null && byGrade[c.tariff_grade]);
+  if (!todo.length) { alert("Немає рядків, де є розряд, але бракує ставки (або для цього розряду ще ніде не вказано ставку)."); return; }
+  const mode = arr => { const m = {}; arr.forEach(x => m[x] = (m[x] || 0) + 1); return Number(Object.entries(m).sort((a, b) => b[1] - a[1])[0][0]); };
+  if (!confirm(`Підставити ставку в ${todo.length} рядків за їхнім розрядом?`)) return;
+  for (const c of todo) {
+    await upsertRow("tariff_line_fin", { line_id: c.line_id, base_rate: mode(byGrade[c.tariff_grade]) }, "line_id", null);
+  }
+  renderFinGrid();
+  refreshStepBadges();
+}
+
+// ------------------------------------------------------------------
+//  Крок 6: Excel
+// ------------------------------------------------------------------
+async function renderExportStep() {
+  const area = document.getElementById("exp-area");
+  area.innerHTML = `<div class="loading">Підраховуємо…</div>`;
+  let res;
+  try { res = await collectIssues(); } catch (e) { area.innerHTML = errBox(e.message); return; }
+  const { issues, data } = res;
+  const tot = Object.values(data.totals);
+  const sum = k => tot.reduce((a, t) => a + (Number(t[k]) || 0), 0);
+  const errs = issues.filter(x => x.level === "err").length;
+  area.innerHTML = `
+    <h2>Excel за формою</h2>
+    <p class="hint">Файл містить два аркуші: «Титул і показники» та «Тарифікаційний список» (26 граф за наказом МО №102 від 15.04.1993).
+       Формат друку — <b>А3, альбомна орієнтація</b>, шапка граф повторюється на кожній сторінці.</p>
+    <div class="stat-row">
+      <div class="stat"><b>${data.entries.length}</b><span>працівників</span></div>
+      <div class="stat"><b>${fmtUa(sum("h_1_4") + sum("h_5_9") + sum("h_10_12"))}</b><span>годин на тиждень (гр. 9–11)</span></div>
+      <div class="stat"><b>${money(sum("ped_total"))}</b><span>педагогічна зарплата (гр. 18)</span></div>
+      <div class="stat"><b>${money(sum("grand_total"))}</b><span>всього на місяць (гр. 26)</span></div>
+    </div>
+    ${errs ? `<div class="msg err" style="display:block">Є ${errs} помилок (крок 5). Файл сформується, але форма буде неповною.
+              <a href="#" onclick="switchSub('chk');return false;">Переглянути</a></div>`
+           : `<div class="msg ok" style="display:block">Помилок немає${issues.length ? `, є ${issues.length} попереджень` : ""}.</div>`}
+    <button class="primary" onclick="exportTariffXlsx()">⬇ Сформувати Excel (А3)</button>
+    ${T.period.status === "draft" ? `<p class="hint">Тарифікація ще не затверджена директором — у файлі це чернетка.</p>` : ""}`;
+}
+
+// ------------------------------------------------------------------
+//  Довідка «Як працювати»
+// ------------------------------------------------------------------
+function renderHelp() {
+  document.getElementById("help-area").innerHTML = `<div class="help">
+    <h2>Як вести тарифікацію в застосунку</h2>
+    <p>Тарифікація складається за формою Додатка 1 до Інструкції про порядок обчислення заробітної плати працівників освіти
+       (наказ МО України №102 від 15.04.1993). Застосунок веде вас кроками, перевіряє дані й формує готовий Excel (А3, альбомна).</p>
+
+    <h3>Хто що робить</h3>
+    <ul>
+      <li><b>Заступник директора</b> — кроки 1–3: реквізити, показники, працівники (посади, години, підвищення, доплати у %), реєстр працівників.</li>
+      <li><b>Бухгалтер</b> — крок 4: тарифний розряд, ставки, суми доплат. Інші поля бачить, але не змінює.</li>
+      <li><b>Директор</b> — переглядає й натискає «Затвердити». Після цього тарифікація закривається для змін.</li>
+    </ul>
+
+    <h3>Кроки</h3>
+    <ol>
+      <li><b>Реквізити</b> — назва закладу, населений пункт, ПОГОДЖЕНО / ЗАТВЕРДЖУЮ, підписи.</li>
+      <li><b>Показники</b> — число класів, класів-комплектів, учнів; складові годин (а, б, в…) і розшифровка «з них» (вивільнення, поділ на групи). «Всього» рахується автоматично і звіряється з годинами працівників.</li>
+      <li><b>Працівники</b> — для кожного: категорія, звання, і рядки:
+        <ul><li>«+ години» — предмети, група класів, тижневі години; за потреби — години й % доплати за зошити;</li>
+            <li>«+ посада зі ставкою» — директор, заступник, психолог тощо, з часткою ставки;</li>
+            <li>підвищення ставки (звання, науковий ступінь) — у % до кожного рядка;</li>
+            <li>доплати й надбавки — вид (він сам визначає графу 19–23 чи 25), %, години, примітка.</li></ul></li>
+      <li><b>Ставки й суми</b> — бухгалтер заповнює одну таблицю на всіх: розряд і ставку. Решта рахується; будь-яку суму можна вписати вручну.</li>
+      <li><b>Перевірка</b> — список помилок і попереджень з кнопкою «Виправити».</li>
+      <li><b>Excel</b> — файл за формою, готовий до друку на А3.</li>
+    </ol>
+
+    <h3>Як почати нову тарифікацію</h3>
+    <p>«+ Нова тарифікація» → дата. Якщо вже є попередня — поставте галочку «Скопіювати»: перенесуться реквізити, показники, працівники, години й доплати
+       (категорії й звання — актуальні з реєстру). Ставки бухгалтер вносить заново або кнопкою «Підставити ставки за однаковим розрядом».</p>
+
+    <h3>Налаштування під свій заклад</h3>
+    <p>«⚙ Налаштування форми»: назви трьох колонок (напр. «5–9», «10 (пілот)», «10–11 (без пілоту)») і перелік рядків таблиці показників —
+       додавайте, перейменовуйте, ховайте; складову можна зробити автоматичною сумою рядків поділу. Налаштування спільні для всіх тарифікацій закладу.</p>
+
+    <h3>Підказки</h3>
+    <p>Значок <span class="q">?</span> біля назви поля чи графи — наведіть мишку: там написано, яка це графа форми, хто її заповнює і як вона рахується.</p>
+
+    <h3>Що програма рахує сама</h3>
+    <ul>
+      <li>гр. 7 = ставка × сума % підвищень; гр. 8 = гр. 6 + гр. 7;</li>
+      <li>гр. 12–14 = гр. 8 ÷ норма годин (зазвичай 18) × години;</li>
+      <li>гр. 15–17 = гр. 8 ÷ норма × години із зошитами × %;</li>
+      <li>гр. 24 = гр. 8 × частка ставки посади;</li>
+      <li>гр. 18 і 26 — суми за формою.</li>
+    </ul>
+    <p class="hint">Перелік видів доплат, підвищень і причин додаткових годин зберігається в довідниках бази й змінюється без правки програми.</p>
+  </div>`;
+}
+
+// ------------------------------------------------------------------
+//  10.7 Реєстр працівників: категорія, звання, освіта (графа 4)
+// ------------------------------------------------------------------
+let eduOpen = new Set();
+
+async function renderRegistry() {
+  const area = document.getElementById("reg-area");
+  area.innerHTML = `<div class="loading">Завантаження…</div>`;
+  await loadTariffTeachers();
+  const { data, error } = await sb.from("teacher_education").select("*").order("sort").order("id");
+  if (error) { area.innerHTML = errBox(error.message); return; }
+  T.education = data;
+  drawRegistry();
+}
+
+function drawRegistry() {
+  const ed = dis(T.role === "deputy");
+  const rows = T.teachers.map(t => {
+    const edu = T.education.filter(e => e.teacher_id === t.id);
+    const eduText = edu.map(e => [e.level, e.specialty ? `(${e.specialty})` : ""].join(" ")).join("; ");
+    const open = eduOpen.has(t.id);
+    return `<tr>
+      <td><input value="${esc(t.full_name)}" ${ed} onchange="saveTeacher(${t.id}, 'full_name', this, 'text')"></td>
+      <td><select ${ed} onchange="saveTeacher(${t.id}, 'category', this, 'text')">
+          <option value=""></option>
+          ${CATEGORIES.map(x => `<option ${x === t.category ? "selected" : ""}>${x}</option>`).join("")}</select></td>
+      <td><input list="dl-titles-reg" value="${esc(t.ped_title || "")}" ${ed}
+           onchange="saveTeacher(${t.id}, 'ped_title', this, 'text')"></td>
+      <td style="text-align:center;"><input type="checkbox" style="width:auto;" ${t.is_active !== false ? "checked" : ""} ${ed}
+           onchange="saveTeacher(${t.id}, 'is_active', this, 'bool')"></td>
+      <td><button class="icon-btn" onclick="toggleEdu(${t.id})">${open ? "▾" : "▸"} освіта (${edu.length})</button>
+          <span class="hint">${esc(eduText)}</span></td>
+    </tr>
+    ${open ? `<tr><td colspan="5">${eduBox(t.id, edu, ed)}</td></tr>` : ""}`;
+  }).join("");
+
+  document.getElementById("reg-area").innerHTML = `
+    <h2>Реєстр працівників</h2>
+    <p class="hint">Спільний для навантаження й тарифікації. Категорія і звання звідси копіюються в нову тарифікацію.</p>
+    <datalist id="dl-titles-reg">${TITLES.map(x => `<option value="${x}">`).join("")}</datalist>
+    <div style="overflow-x:auto;"><table class="tt">
+      <thead><tr><th>ПІБ ${q(2)}</th><th>Категорія</th><th>Звання</th><th>Працює</th><th>Освіта (графа 4) ${q(4)}</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+    ${T.role === "deputy" ? `<div style="margin-top:10px;display:flex;gap:8px;max-width:520px;">
+      <input id="reg-new" placeholder="ПІБ нового працівника">
+      <button class="icon-btn" style="white-space:nowrap;" onclick="addTeacher()">+ Додати</button></div>` : ""}`;
+}
+
+function eduBox(tid, edu, ed) {
+  const rows = edu.map(e => `<tr>
+    <td><input value="${esc(e.level)}" ${ed} placeholder="вища" onchange="saveEdu(${e.id}, 'level', this, 'text')"></td>
+    <td><input value="${esc(e.specialty || "")}" ${ed} onchange="saveEdu(${e.id}, 'specialty', this, 'text')"></td>
+    <td><input value="${esc(e.diploma || "")}" ${ed} onchange="saveEdu(${e.id}, 'diploma', this, 'text')"></td>
+    <td><input class="n-s" value="${inVal(e.grad_year)}" ${ed} onchange="saveEdu(${e.id}, 'grad_year', this, 'int')"></td>
+    <td>${ed ? "" : `<button class="x-btn" onclick="deleteEdu(${e.id})">×</button>`}</td></tr>`).join("");
+  return `<div class="edu-box"><table class="tt">
+    <thead><tr><th>Рівень</th><th>Спеціальність / кваліфікація</th><th>Диплом (серія, №)</th><th>Рік</th><th></th></tr></thead>
+    <tbody>${rows}</tbody></table>
+    ${ed ? "" : `<button class="icon-btn" style="margin-top:6px;" onclick="addEdu(${tid})">+ диплом</button>`}</div>`;
+}
+
+function toggleEdu(tid) { eduOpen.has(tid) ? eduOpen.delete(tid) : eduOpen.add(tid); drawRegistry(); }
+
+async function saveTeacher(id, field, el, type) {
+  const v = readVal(el, type);
+  if (!checkVal(v, el, { required: field === "full_name" })) return;
+  if (await saveRow("teacher", { id }, { [field]: v }, el)) {
+    T.teachers.find(t => t.id === id)[field] = v;
+    // тримаємо в синхроні список у розділі «Навантаження»
+    const lt = teachersCache.find(t => t.id === id);
+    if (lt && field === "full_name") { lt.full_name = v; if (loadTabInited) drawTeachers(); }
+  }
+}
+async function addTeacher() {
+  const name = document.getElementById("reg-new").value.trim();
+  if (!name) return;
+  if (await insertRows("teacher", [{ full_name: name }])) renderRegistry();
+}
+async function addEdu(tid) {
+  if (await insertRows("teacher_education", [{ teacher_id: tid, level: "вища" }])) renderRegistry();
+}
+async function saveEdu(id, field, el, type) {
+  const v = readVal(el, type);
+  if (!checkVal(v, el, { required: field === "level" })) return;
+  if (await saveRow("teacher_education", { id }, { [field]: v }, el)) {
+    T.education.find(e => e.id === id)[field] = v;
+  }
+}
+async function deleteEdu(id) {
+  if (!confirm("Видалити запис про освіту?")) return;
+  if (await deleteRows("teacher_education", { id })) renderRegistry();
 }
 
 // ------------------------------------------------------------------
