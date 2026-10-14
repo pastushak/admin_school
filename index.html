@@ -1238,7 +1238,7 @@ async function copyPeriodData(fromId, toId) {
     sb.from("tariff_indicator_value").select("*").eq("period_id", fromId),
     sb.from("tariff_entry").select(`id, teacher_id, row_no, employment, category, ped_title, note,
         tariff_line ( id, sort, kind, position_name, subjects, rate_fraction, band_code, hours,
-                       hours_norm, notebook_hours, notebook_pct,
+                       hours_norm, notebook_hours, notebook_pct, form_column,
                        tariff_line_raise ( raise_type_id, pct ) ),
         tariff_supplement ( type_id, pct, hours, note )`).eq("period_id", fromId).order("row_no")
   ]);
@@ -1698,7 +1698,12 @@ function drawEntryEditor() {
       <td style="min-width:170px;"><input value="${esc(l.subjects || "")}" ${dep} onchange="saveLine(${l.id}, 'subjects', this, 'text')"></td>
       <td>${isT
         ? `<select style="min-width:110px;" ${dep} onchange="saveLine(${l.id}, 'band_code', this, 'text')">${bandOpts(l.band_code)}</select>`
-        : `<input class="n-s" value="${inVal(l.rate_fraction)}" ${dep} onchange="saveLine(${l.id}, 'rate_fraction', this, 'num')"><span class="hint"> ст.</span>`}</td>
+        : `<input class="n-s" value="${inVal(l.rate_fraction)}" ${dep} onchange="saveLine(${l.id}, 'rate_fraction', this, 'num')"><span class="hint"> ст.</span>
+           <select style="width:auto;margin-top:3px;font-size:12px;" ${dep} title="У яку графу форми йде оклад"
+             onchange="saveLine(${l.id}, 'form_column', this, 'int')">
+             <option value="24" ${l.form_column !== 23 ? "selected" : ""}>графа 24 (оклад персоналу)</option>
+             <option value="23" ${l.form_column === 23 ? "selected" : ""}>графа 23 (керівництво школою)</option>
+           </select>`}</td>
       <td>${isT ? `<input class="n-s" value="${inVal(l.hours)}" ${dep} onchange="saveLine(${l.id}, 'hours', this, 'num')">` : ""}</td>
       <td>${isT ? `<input class="n-s" value="${inVal(l.notebook_hours)}" ${dep} onchange="saveLine(${l.id}, 'notebook_hours', this, 'num')">` : ""}</td>
       <td>${isT ? `<input class="n-s" value="${inVal(l.notebook_pct)}" ${dep} onchange="saveLine(${l.id}, 'notebook_pct', this, 'num')">` : ""}</td>
@@ -1950,8 +1955,9 @@ async function exportTariffXlsx() {
 async function loadExportData(pid) {
   const q = await Promise.all([
     sb.from("tariff_entry")
-      .select(`id, row_no, employment, category, ped_title, teacher_id, teacher:teacher_id(full_name),
-               tariff_line(*), tariff_supplement(*, supplement_type(name, form_column), tariff_supplement_fin(amount))`)
+      .select(`id, row_no, employment, category, ped_title, note, teacher_id, teacher:teacher_id(full_name),
+               tariff_line(*, tariff_line_raise(pct), tariff_line_fin(*)),
+               tariff_supplement(*, supplement_type(name, form_column), tariff_supplement_fin(amount))`)
       .eq("period_id", pid).order("row_no"),
     sb.from("v_tariff_entry_total").select("*").eq("period_id", pid),
     sb.from("tariff_indicator").select("*").eq("period_id", pid),
@@ -1991,6 +1997,9 @@ function xlCell(ws, addr, value, opt = {}) {
   return c;
 }
 const num0 = v => (v === null || v === undefined || v === "" ? null : Number(v));
+const fx = (formula, result) => ({ formula, result: Math.round((Number(result) || 0) * 100) / 100 });   // формула + готове значення
+const pf = x => String(Math.round(Number(x) * 10000) / 10000);         // 0.25, 0.1 — множник у формулі
+const fmtXl = x => String(Math.round(Number(x) * 100) / 100);          // число в тексті формули
 const nz = v => { const x = num0(v); return x ? x : null; };   // 0 -> порожня комірка
 
 // ================= Аркуш 1: титул і показники =================
@@ -2150,19 +2159,20 @@ function buildListSheet(wb, p, d) {
                     s.hours != null ? `${fmtUa(s.hours)} год` : null, s.note].filter(Boolean).join(", ");
       (supNotes[fc] ||= []).push(note);
     }
-    const blockVals = {
-      1: e.row_no, 2: nameText, 4: eduText,
-      18: nz(t.ped_total), 19: nz(sup[19]), 20: nz(sup[20]), 21: nz(sup[21]), 22: nz(sup[22]), 23: nz(sup[23]),
-      25: nz(sup[25]), 26: nz(t.grand_total)
+    const writeBlock = (vals) => {
+      for (const [c, v] of Object.entries(vals)) {
+        const cn = +c;
+        const cell = xlCell(ws, `${col(cn)}${top}`, v, {
+          h: cn === 4 || cn === 2 ? "center" : (cn >= 18 ? "right" : "center"),
+          bold: cn === 2, size: cn === 4 ? 10 : 11, fmt: cn >= 18 ? XL_MONEY : undefined, border: true });
+        if (supNotes[cn]) cell.note = supNotes[cn].join("\n");   // що саме нараховано — у примітці до комірки
+        if (nRows > 1) ws.mergeCells(`${col(cn)}${top}:${col(cn)}${bottom}`);
+      }
     };
-    for (const [c, v] of Object.entries(blockVals)) {
-      const cn = +c;
-      const cell = xlCell(ws, `${col(cn)}${top}`, v, {
-        h: cn === 4 || cn === 2 ? "center" : (cn >= 18 ? "right" : "center"),
-        bold: cn === 2, size: cn === 4 ? 10 : 11, fmt: cn >= 18 ? XL_MONEY : undefined, border: true });
-      if (supNotes[cn]) cell.note = supNotes[cn].join("\n");   // що саме нараховано — у примітці до комірки
-      if (nRows > 1) ws.mergeCells(`${col(cn)}${top}:${col(cn)}${bottom}`);
-    }
+    writeBlock({ 1: e.row_no, 2: nameText, 4: eduText });
+    // формули рядків: для блоку потрібні «бази» (ставки, зарплати) з адресами комірок
+    const bases = [];         // { expr, value } — можливі бази доплат
+    const posTerms23 = [];    // формули окладів у графу 23
 
     // рядки посад і годин
     lines.forEach((l, k) => {
@@ -2174,28 +2184,143 @@ function buildListSheet(wb, p, d) {
         : `${l.position_name}${l.subjects ? " " + l.subjects : ""}`;
       xlCell(ws, `C${row}`, head ? `${head};\n${what}` : what, { h: "center", border: true, size: 10,
              bold: l.kind === "position" });
-      xlCell(ws, `E${row}`, l.kind ? (c.tariff_grade ?? null) : null, { h: "center", border: true });
+      const fin = (Array.isArray(l.tariff_line_fin) ? l.tariff_line_fin[0] : l.tariff_line_fin) || {};
+      const hasRate = c.base_rate != null || c.rate_total != null;
+      const rate = Number(c.rate_total) || 0;
+      const norm = Number(l.hours_norm) || 18;
+      xlCell(ws, `E${row}`, c.tariff_grade ?? null, { h: "center", border: true });
       xlCell(ws, `F${row}`, num0(c.base_rate), { h: "right", border: true, fmt: XL_MONEY });
-      xlCell(ws, `G${row}`, nz(c.raise_amount), { h: "right", border: true, fmt: XL_MONEY });
-      xlCell(ws, `H${row}`, c.base_rate != null || c.rate_total != null ? num0(c.rate_total) : null,
-             { h: "right", border: true, fmt: XL_MONEY });
+      // гр. 7: = гр.6 × % кожного підвищення (як H = G*0,1 у вашому файлі)
+      const raises = (l.tariff_line_raise || []).map(x => Number(x.pct)).filter(Boolean);
+      xlCell(ws, `G${row}`, c.base_rate != null && raises.length
+        ? fx(raises.map(p => `F${row}*${pf(p / 100)}`).join("+"), c.raise_amount) : null,
+        { h: "right", border: true, fmt: XL_MONEY });
+      // гр. 8: = гр.6 + гр.7 (якщо бухгалтер не вписала ставку вручну)
+      xlCell(ws, `H${row}`, !hasRate ? null
+        : (fin.rate_override != null || c.base_rate == null) ? num0(c.rate_total)
+        : fx(raises.length ? `F${row}+G${row}` : `F${row}`, c.rate_total),
+        { h: "right", border: true, fmt: XL_MONEY });
+      if (hasRate) bases.push({ expr: `H${row}`, value: rate });
       for (let b = 0; b < 3; b++) {
         const isBand = l.kind === "teaching" && BAND_COL[l.band_code] === b;
-        xlCell(ws, `${col(9 + b)}${row}`, isBand ? num0(l.hours) : null, { h: "center", border: true, fmt: XL_HOURS });
-        xlCell(ws, `${col(12 + b)}${row}`, isBand ? num0(c.teaching_salary) : null, { h: "right", border: true, fmt: XL_MONEY });
-        xlCell(ws, `${col(15 + b)}${row}`, isBand ? nz(c.notebook_amount) : null, { h: "right", border: true, fmt: XL_MONEY });
+        const hc = `${col(9 + b)}${row}`, sc = `${col(12 + b)}${row}`;
+        xlCell(ws, hc, isBand ? num0(l.hours) : null, { h: "center", border: true, fmt: XL_HOURS });
+        // гр. 12–14: = гр.8 / 18 × години
+        let sal = null;
+        if (isBand && hasRate) {
+          sal = fin.salary_override != null ? Number(c.teaching_salary)
+              : fx(`H${row}/${norm}*${hc}`, rate / norm * Number(l.hours));
+          bases.push({ expr: `H${row}/${norm}*${hc}`, value: rate / norm * Number(l.hours) });
+        } else if (isBand) sal = num0(c.teaching_salary);
+        xlCell(ws, sc, sal, { h: "right", border: true, fmt: XL_MONEY });
+        // гр. 15–17: = зарплата × % (усі години) або гр.8 / 18 × години із зошитами × %
+        let nb = null;
+        if (isBand && l.notebook_hours && l.notebook_pct && hasRate && fin.notebook_override == null) {
+          const p = pf(Number(l.notebook_pct) / 100);
+          nb = Number(l.notebook_hours) === Number(l.hours)
+            ? fx(`${sc}*${p}`, Number(c.notebook_amount))
+            : fx(`H${row}/${norm}*${fmtXl(l.notebook_hours)}*${p}`, Number(c.notebook_amount));
+        } else if (isBand) nb = nz(c.notebook_amount);
+        xlCell(ws, `${col(15 + b)}${row}`, nb, { h: "right", border: true, fmt: XL_MONEY });
       }
-      xlCell(ws, `X${row}`, l.kind === "position" ? num0(c.position_salary) : null, { h: "right", border: true, fmt: XL_MONEY });
+      // посада: гр. 24 у рядку або гр. 23 блоку (= гр.8 × частка; ×0,95 — якщо так у бухгалтера)
+      let posCell = null;
+      if (l.kind === "position") {
+        const frac = Number(l.rate_fraction) || 1;
+        const amount = Number(c.position_salary);
+        let expr = null;
+        if (hasRate && rate) {
+          const k = amount / (rate * frac);
+          if (Math.abs(k - 1) < 0.0005) expr = frac === 1 ? `H${row}` : `H${row}*${pf(frac)}`;
+          else if (Math.abs(k - 0.95) < 0.0005) expr = `H${row}*0.95*${pf(frac)}`;
+        }
+        if (l.form_column === 23) posTerms23.push(expr ? { expr, value: amount } : { expr: fmtXl(amount), value: amount });
+        else posCell = expr ? fx(expr, amount) : num0(c.position_salary);
+      }
+      xlCell(ws, `X${row}`, posCell, { h: "right", border: true, fmt: XL_MONEY });
       if (l.kind === "teaching" && l.notebook_hours && l.notebook_pct) {
         ws.getCell(`${col(15 + BAND_COL[l.band_code])}${row}`).note =
           `${fmtUa(l.notebook_hours)} год × ${fmtUa(l.notebook_pct)}%`;
       }
     });
     if (!lines.length) {
-      xlCell(ws, `C${top}`, [e.category, e.ped_title].filter(Boolean).join(", "), { h: "center", border: true });
+      xlCell(ws, `C${top}`, [e.category, e.ped_title, e.note].filter(Boolean).join(", "), { h: "center", border: true });
       for (const cn of [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 24]) xlCell(ws, `${col(cn)}${top}`, null, { border: true });
     }
-    for (let rr = top; rr <= bottom; rr++) ws.getRow(rr).height = nRows === 1 ? 48 : Math.max(24, 15 * 3 / nRows * 1.2);
+    // --- графи блоку (18–23, 25, 26) — формулами, як у вихідному файлі
+    const cellNum = a => { const v = ws.getCell(a).value; return typeof v === "number" ? v : (v && typeof v.result === "number" ? v.result : 0); };
+    const sumCells = (c0, c1) => { let x = 0; for (let rr = top; rr <= bottom; rr++) for (let cc = c0; cc <= c1; cc++) x += cellNum(`${col(cc)}${rr}`); return x; };
+    const salSum = sumCells(12, 14), nbSum = sumCells(15, 17);
+    const pedTotal = salSum + nbSum;
+    // доплата = база × % ; база — ставка рядка, зарплата рядка або «ставка N / 18 × год» (гурток)
+    const supExpr = (s, amount) => {
+      const pct = s.pct != null ? Number(s.pct) / 100 : null;
+      const cands = [...bases];
+      const m = String(s.note || "").match(/ставка\s+([\d.,]+)/);
+      if (m && s.hours) { const rateN = Number(m[1].replace(",", ".")); cands.push({ expr: `${fmtXl(rateN)}/18*${fmtXl(s.hours)}`, value: rateN / 18 * Number(s.hours), noPct: true }); }
+      for (const b of cands) {
+        const val = b.noPct || !pct ? b.value : b.value * pct;
+        if (Math.abs(val - amount) <= 0.011) return b.noPct || !pct ? b.expr : `${b.expr}*${pf(pct)}`;
+      }
+      return null;
+    };
+    const colTerms = {};      // графа -> [{expr, value}]
+    const supsByCol = {};
+    for (const s of e.tariff_supplement || []) (supsByCol[s.supplement_type?.form_column] ||= []).push(s);
+    const amountOf = s => { const f = Array.isArray(s.tariff_supplement_fin) ? s.tariff_supplement_fin[0] : s.tariff_supplement_fin; return Number(f?.amount) || 0; };
+    for (const fc of [19, 20, 21, 22, 23]) {
+      const terms = fc === 23 ? [...posTerms23] : [];
+      for (const s of supsByCol[fc] || []) {
+        const a = amountOf(s); const ex = supExpr(s, a);
+        terms.push({ expr: ex || fmtXl(a), value: a });
+      }
+      colTerms[fc] = terms;
+    }
+    const termCell = terms => !terms.length ? null
+      : terms.length === 1 && /^[\d.]+$/.test(terms[0].expr) ? terms[0].value
+      : fx(terms.map(t => t.expr).join("+"), terms.reduce((a, t) => a + t.value, 0));
+    // гр. 25 (вислуга, престижність): % від суми певних граф — шукаємо, від яких саме
+    const comps = [
+      { key: "sal", expr: `SUM(L${top}:N${bottom})`, value: salSum },
+      { key: "nb", expr: `SUM(O${top}:Q${bottom})`, value: nbSum },
+      ...[19, 20, 21, 22, 23].map(fc => ({ key: "c" + fc, expr: `${col(fc)}${top}`, value: colTerms[fc].reduce((a, t) => a + t.value, 0) })),
+      { key: "c24", expr: `SUM(X${top}:X${bottom})`, value: sumCells(24, 24) }
+    ].filter(x => x.value);
+    const subsets = [];
+    for (let mask = 1; mask < (1 << comps.length); mask++) subsets.push(comps.filter((_, i) => mask & (1 << i)));
+    subsets.sort((a, b) => a.length - b.length);
+    const terms25 = [];
+    for (const s of supsByCol[25] || []) {
+      const a = amountOf(s); const pct = s.pct != null ? Number(s.pct) / 100 : null;
+      let ex = null;
+      if (pct) for (const sub of subsets) {
+        if (Math.abs(sub.reduce((x, y) => x + y.value, 0) * pct - a) <= 0.015) {
+          const keys = sub.map(x => x.key).sort().join(",");
+          const inner = keys === "nb,sal" ? `R${top}` : sub.map(x => x.expr).join("+");
+          ex = (sub.length > 1 && keys !== "nb,sal" ? `(${inner})` : inner) + `*${pf(pct)}`;
+          break;
+        }
+      }
+      terms25.push({ expr: ex || fmtXl(a), value: a });
+    }
+    writeBlock({
+      18: lines.length ? fx(`SUM(L${top}:Q${bottom})`, pedTotal) : null,
+      19: termCell(colTerms[19]), 20: termCell(colTerms[20]), 21: termCell(colTerms[21]),
+      22: termCell(colTerms[22]), 23: termCell(colTerms[23]), 25: termCell(terms25),
+      26: fx(`R${top}+S${top}+T${top}+U${top}+V${top}+W${top}+SUM(X${top}:X${bottom})+Y${top}`,
+             pedTotal + [19, 20, 21, 22, 23].reduce((a, fc) => a + colTerms[fc].reduce((x, t) => x + t.value, 0), 0)
+             + sumCells(24, 24) + terms25.reduce((a, t) => a + t.value, 0))
+    });
+
+    // висота рядків: щоб уміщався текст графи 3 і щоб на блок вистачило 3–4 рядків для ПІБ і освіти
+    const estLines = t => String(t || "").split("\n").reduce((a, p) => a + Math.max(1, Math.ceil(p.length / 48)), 0);
+    let blockH = 0;
+    for (let rr = top; rr <= bottom; rr++) {
+      const hgt = Math.max(20, 13 * estLines(ws.getCell(`C${rr}`).value) + 6);
+      ws.getRow(rr).height = hgt; blockH += hgt;
+    }
+    const needH = 13 * Math.max(nameText.split("\n").length, estLines(eduText)) + 8;
+    if (blockH < needH) ws.getRow(bottom).height += needH - blockH;
     // товстіша лінія між працівниками
     for (let cn = 1; cn <= 26; cn++) {
       const cell = ws.getCell(`${col(cn)}${bottom}`);
@@ -2214,7 +2339,8 @@ function buildListSheet(wb, p, d) {
     for (let rr = firstRow; rr <= last; rr++) {
       const cell = ws.getCell(`${col(cn)}${rr}`);
       if (cell.isMerged && cell.master !== cell) continue;     // підлеглі комірки об'єднання повертають значення головної
-      if (typeof cell.value === "number") res += cell.value;
+      const v = cell.value;
+      if (typeof v === "number") res += v; else if (v && typeof v.result === "number") res += v.result;
     }
     xlCell(ws, `${col(cn)}${r}`, { formula: `SUM(${col(cn)}${firstRow}:${col(cn)}${last})`, result: Math.round(res * 100) / 100 },
            { h: cn <= 11 ? "center" : "right", bold: true, border: true, fmt: cn <= 11 ? XL_HOURS : XL_MONEY });
@@ -2340,7 +2466,7 @@ async function collectIssues() {
     const name = e.teacher?.full_name || "Вакансія";
     (rowNos[e.row_no] ||= []).push(name);
     const lines = e.tariff_line;
-    if (!lines.length) add("ent", "err", `${name}: немає жодної посади чи годин.`, e.id);
+    if (!lines.length && !(e.tariff_supplement || []).length) add("ent", "err", `${name}: немає жодної посади, годин чи доплат.`, e.id);
     if (!e.category && e.employment !== "вакансія") add("ent", "warn", `${name}: не вказано категорію (графа 3).`, e.id);
     if (e.teacher_id && !d.edu.some(x => x.teacher_id === e.teacher_id))
       add("ent", "warn", `${name}: не внесено освіту (графа 4) — додайте в «Реєстрі працівників».`, e.id);
