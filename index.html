@@ -1112,7 +1112,8 @@ async function initTariff() {
   ]);
   const firstErr = [b, r, s].find(q => q.error);
   if (firstErr) { panel.innerHTML = errBox(firstErr.error.message); return; }
-  T.bands = b.data; T.raiseTypes = r.data; T.supTypes = s.data;
+  T.allBands = b.data; T.bands = b.data.filter(x => x.active !== false);
+  T.raiseTypes = r.data; T.supTypes = s.data;
   T.indRows = x.error ? [] : x.data;
   if (x.error) setTimeout(() => alert("Потрібне оновлення бази: запустіть tarification_stage2.sql у Supabase (SQL Editor). Без нього не працюватиме таблиця показників."), 300);
 
@@ -1464,11 +1465,14 @@ function renderSettings() {
     <h2>Налаштування форми</h2>
     <p class="hint">Ці налаштування спільні для всіх тарифікацій закладу. ${T.role === "deputy" ? "" : "<b>Змінювати може заступник директора.</b>"}</p>
 
-    <div class="sec-title">Колонки (групи класів) ${qt("Три колонки форми: години (графи 9–11), зарплата (12–14), зошити (15–17) і таблиця показників. Назву можна змінити, напр. «5–9», «10 (пілот)», «10–11 (без пілоту)». Колонка — це номер, а не клас: якщо в ній уже є години працівників, після перейменування вони лишаться в тій самій колонці.")}</div>
-    <table class="tt" style="max-width:520px;"><thead><tr><th>№</th><th>Назва колонки</th></tr></thead><tbody>
-      ${T.bands.map((b, i) => `<tr><td>${i + 1}</td><td><input value="${esc(b.label)}" ${ed}
-          onchange="saveBandLabel('${b.code}', this)"></td></tr>`).join("")}
+    <div class="sec-title">Колонки (групи класів) ${qt("Колонки груп класів: години (графи 9–11), зарплата (12–14), зошити (15–17) і таблиця показників. Може бути четверта колонка — напр. «10 (пілот)»; в Excel вона матиме номери 11а, 14а, 17а. Назву можна змінити, напр. «5–9», «10 (пілот)», «10–11 (без пілоту)». Колонка — це номер, а не клас: якщо в ній уже є години працівників, після перейменування вони лишаться в тій самій колонці.")}</div>
+    <table class="tt" style="max-width:620px;"><thead><tr><th>№</th><th>Назва колонки</th><th>Показувати</th></tr></thead><tbody>
+      ${(T.allBands || T.bands).map((b, i) => `<tr><td>${i + 1}</td><td><input value="${esc(b.label)}" ${ed}
+          onchange="saveBandLabel('${b.code}', this)"></td>
+          <td style="text-align:center;"><input type="checkbox" style="width:auto;" ${b.active !== false ? "checked" : ""} ${ed}
+          onchange="saveBandActive('${b.code}', this)"></td></tr>`).join("")}
     </tbody></table>
+    <p class="hint">Прихована колонка не показується в застосунку й в Excel. Не ховайте колонку, в якій уже є години працівників.</p>
 
     <div class="sec-title">Рядки таблиці показників ${qt("Складові рядка 4 (а, б, в…) дають «всього». Рядки «з них» — розшифровка. Складову можна зробити автоматичною: напр. «в) години поділу» = сума рядків поділу на групи. Довідковий рядок (без галочки «у суми») показується, але не додається.")}</div>
     <div style="overflow-x:auto;"><table class="tt"><thead><tr>
@@ -1496,7 +1500,13 @@ function renderSettings() {
 async function saveBandLabel(code, el) {
   const v = readVal(el, "text");
   if (!checkVal(v, el, { required: true })) return;
-  if (await saveRow("tariff_band", { code }, { label: v }, el)) T.bands.find(b => b.code === code).label = v;
+  if (await saveRow("tariff_band", { code }, { label: v }, el)) (T.allBands || T.bands).find(b => b.code === code).label = v;
+}
+async function saveBandActive(code, el) {
+  if (await saveRow("tariff_band", { code }, { active: el.checked }, el)) {
+    const b = (T.allBands || T.bands).find(x => x.code === code); b.active = el.checked;
+    T.bands = (T.allBands || T.bands).filter(x => x.active !== false);
+  } else renderSettings();
 }
 async function reloadIndRows() {
   const { data } = await sb.from("indicator_row").select("*").order("sort").order("id");
@@ -1534,7 +1544,7 @@ async function loadEntries() {
     sb.from("tariff_entry")
       .select("id, row_no, employment, category, ped_title, note, teacher_id, teacher:teacher_id(full_name)")
       .eq("period_id", T.period.id).order("row_no"),
-    sb.from("v_tariff_entry_total").select("entry_id, h_1_4, h_5_9, h_10_12, grand_total")
+    sb.from("v_tariff_entry_total").select("entry_id, h_all, grand_total")
       .eq("period_id", T.period.id)
   ]);
   if (ent.error || tot.error) { box.innerHTML = errBox((ent.error || tot.error).message); return; }
@@ -1551,9 +1561,9 @@ function drawEntryList() {
   const box = document.getElementById("entry-list");
   if (!T.entries.length) { box.innerHTML = `<p class="hint">Список порожній.</p>`; return; }
   const allHours = T.entries.reduce((a, e) =>
-    a + (Number(e.tot.h_1_4) || 0) + (Number(e.tot.h_5_9) || 0) + (Number(e.tot.h_10_12) || 0), 0);
+    a + (Number(e.tot.h_all) || 0), 0);
   box.innerHTML = T.entries.map(e => {
-    const h = (Number(e.tot.h_1_4) || 0) + (Number(e.tot.h_5_9) || 0) + (Number(e.tot.h_10_12) || 0);
+    const h = Number(e.tot.h_all) || 0;
     const meta = [e.category, h ? fmtUa(h) + " год" : null,
                   e.employment !== "основний" ? e.employment : null].filter(Boolean).join(" · ");
     return `<div class="entry-item ${e.id === T.entryId ? "sel" : ""}" onclick="openEntry(${e.id})">
@@ -1783,7 +1793,7 @@ function drawEntryTotals() {
   const item = (g, label, v, isMoney = true) =>
     `<span>гр. ${g} ${label}: <b>${isMoney ? money(v) : fmtUa(v || 0)}</b></span>`;
   box.innerHTML = [
-    item("9–11", "години", (Number(t.h_1_4) || 0) + (Number(t.h_5_9) || 0) + (Number(t.h_10_12) || 0), false),
+    item("9–11", "години", Number(t.h_all) || 0, false),
     item(18, "педагогічна зарплата", t.ped_total),
     item("19–23", "додаткова оплата",
       ["c19", "c20", "c21", "c22", "c23"].reduce((a, k) => a + (Number(t[k]) || 0), 0)),
@@ -2009,7 +2019,10 @@ function buildTitleSheet(wb, p, d) {
                  margins: { left: 0.6, right: 0.4, top: 0.5, bottom: 0.5, header: 0.2, footer: 0.2 } },
     views: [{ showGridLines: false }]
   });
-  ws.columns = [{ width: 8 }, { width: 84 }, { width: 22 }, { width: 22 }, { width: 24 }, { width: 22 }];   // під А3 альбомну
+  const NB = T.bands.length;
+  const L = i => String.fromCharCode(65 + i);            // 0 -> A
+  const BC = k => L(2 + k), TC = L(2 + NB);              // колонки груп класів і «Разом»
+  ws.columns = [{ width: 8 }, { width: 84 }, ...Array(NB).fill({ width: 20 }), { width: 20 }];   // під А3 альбомну
 
   xlCell(ws, "D1", "Додаток № 1", { wrap: false });
   xlCell(ws, "D2", "до Інструкції про порядок обчислення", { wrap: false });
@@ -2027,7 +2040,7 @@ function buildTitleSheet(wb, p, d) {
   xlCell(ws, "D8", `____________ ${p.approved_name || ""}`, { wrap: false });
   xlCell(ws, "D9", dateLine(p.approved_date), { wrap: false });
 
-  const center = (row, text, opt = {}) => { ws.mergeCells(`A${row}:F${row}`); xlCell(ws, `A${row}`, text, { h: "center", ...opt }); };
+  const center = (row, text, opt = {}) => { ws.mergeCells(`A${row}:${TC}${row}`); xlCell(ws, `A${row}`, text, { h: "center", ...opt }); };
   center(11, "Тарифікаційний список", { size: 14, bold: true });
   center(12, "вчителів та інших працівників");
   center(13, p.institution_name || "", { bold: true });
@@ -2039,7 +2052,7 @@ function buildTitleSheet(wb, p, d) {
   // --- таблиця показників
   const HR = 18;
   ["№ п/п", "Показники на початок навчального року", ...T.bands.map(b => b.label), "Разом"]
-    .forEach((t, i) => xlCell(ws, `${"ABCDEF"[i]}${HR}`, t, { bold: true, h: "center", border: true }));
+    .forEach((t, i) => xlCell(ws, `${L(i)}${HR}`, t, { bold: true, h: "center", border: true }));
   ws.getRow(HR).height = 30;
 
   const I = {}; d.ind.forEach(x => I[x.band_code] = x);
@@ -2053,14 +2066,14 @@ function buildTitleSheet(wb, p, d) {
                                h: opt.center ? "center" : "left" });
     bands.forEach((code, k) => {
       const v = vals ? vals(code) : null;
-      xlCell(ws, `${"CDE"[k]}${r}`, v === null || v === undefined ? null : v,
+      xlCell(ws, `${BC(k)}${r}`, v === null || v === undefined ? null : v,
              { h: "center", border: true, bold: !!opt.bold, fmt: opt.int ? "0" : XL_HOURS });
     });
     if (vals) {
       const res = bands.reduce((a, c) => a + (Number(vals(c)) || 0), 0);
-      xlCell(ws, `F${r}`, res ? { formula: `SUM(C${r}:E${r})`, result: res } : null,
+      xlCell(ws, `${TC}${r}`, res ? { formula: `SUM(${BC(0)}${r}:${BC(NB - 1)}${r})`, result: res } : null,
              { h: "center", border: true, bold: true, fmt: opt.int ? "0" : XL_HOURS });
-    } else xlCell(ws, `F${r}`, null, { border: true });
+    } else xlCell(ws, `${TC}${r}`, null, { border: true });
     if (String(text).length > 90) ws.getRow(r).height = 30;
     r++;
   };
@@ -2092,9 +2105,25 @@ function buildListSheet(wb, p, d) {
                  margins: { left: 0.25, right: 0.25, top: 0.4, bottom: 0.4, header: 0.2, footer: 0.2 } },
     views: [{ state: "frozen", xSplit: 2, ySplit: 3 }]
   });
-  const widths = [5, 20, 40, 34, 10, 11, 11, 12, 8, 8, 8, 12, 12, 12, 10, 10, 10, 14, 12, 14, 13, 13, 14, 15, 13, 14];
+  // Колонок груп класів може бути 3 або 4 (напр. окремо «10 (пілот)»).
+  // Номер графи форми g -> фізична колонка: графи 9–17 розширюються на NB колонок кожна група.
+  const NB = T.bands.length;
+  const phys = g => g <= 8 ? g : g + 3 * (NB - 3);       // для граф 18–26
+  const HC = k => 9 + k, SC = k => 9 + NB + k, NC = k => 9 + 2 * NB + k;   // години / зарплата / зошити
+  const TOT = 26 + 3 * (NB - 3);
+  const widths = [5, 20, 40, 34, 10, 11, 11, 12,
+                  ...Array(NB).fill(8), ...Array(NB).fill(12), ...Array(NB).fill(10),
+                  14, 12, 14, 13, 13, 14, 15, 13, 14];
   ws.columns = widths.map(w => ({ width: w }));
   const col = n => ws.getColumn(n).letter;
+  const C = g => col(phys(g));                              // літера колонки графи 18–26
+  // номер графи в 3-му рядку шапки: 9,10,11 і «11а» для четвертої колонки
+  const graphNo = c => {
+    if (c <= 8) return c;
+    if (c < 9 + 3 * NB) { const grp = Math.floor((c - 9) / NB), k = (c - 9) % NB, base = 9 + grp * 3;
+      return k < 3 ? base + k : `${base + 2}${"абв"[k - 3]}`; }
+    return c - 3 * (NB - 3);
+  };
 
   // --- шапка граф
   const HEAD = {
@@ -2104,8 +2133,8 @@ function buildListSheet(wb, p, d) {
     24: "Оклад (ставка) навчально-допоміжного, адміністративного та ін. персоналу",
     25: "Інші доплати", 26: "Всього заробітна плата на місяць"
   };
-  const GROUPS = [[9, 11, "Кількість годин в тиждень"], [12, 14, "Зарплата на місяць"],
-                  [15, 17, "Доплата за перевірку зошитів"], [19, 23, "Додаткова оплата за"]];
+  const GROUPS = [[HC(0), HC(NB - 1), "Кількість годин в тиждень"], [SC(0), SC(NB - 1), "Зарплата на місяць"],
+                  [NC(0), NC(NB - 1), "Доплата за перевірку зошитів"], [phys(19), phys(23), "Додаткова оплата за"]];
   const SUB = {
     19: "класне керівництво",
     20: "завідування кабінетом, навчально-дослідною ділянкою, виконання обов'язків майстра навчальної майстерні",
@@ -2114,21 +2143,21 @@ function buildListSheet(wb, p, d) {
     23: "керівництво школою, групами продовженого дня, НКП, інтернатом при школі, ведення діловодства і бухобліку"
   };
   const BANDS = T.bands.map(b => b.label);
-  for (let c = 1; c <= 26; c++) {
+  for (let c = 1; c <= TOT; c++) {
     for (let rr = 1; rr <= 3; rr++) xlCell(ws, `${col(c)}${rr}`, null, { h: "center", border: true, size: 10 });
-    ws.getCell(`${col(c)}3`).value = c;
+    ws.getCell(`${col(c)}3`).value = graphNo(c);
     ws.getCell(`${col(c)}3`).font = { name: XL_FONT, size: 10, bold: true };
   }
   for (const [c, t] of Object.entries(HEAD)) {
-    ws.getCell(`${col(+c)}1`).value = t;
-    ws.mergeCells(`${col(+c)}1:${col(+c)}2`);
+    ws.getCell(`${C(+c)}1`).value = t;
+    ws.mergeCells(`${C(+c)}1:${C(+c)}2`);
   }
   for (const [a, b, t] of GROUPS) {
     ws.getCell(`${col(a)}1`).value = t;
     ws.mergeCells(`${col(a)}1:${col(b)}1`);
   }
-  [9, 12, 15].forEach(a => BANDS.forEach((t, k) => ws.getCell(`${col(a + k)}2`).value = t));
-  for (const [c, t] of Object.entries(SUB)) ws.getCell(`${col(+c)}2`).value = t;
+  [HC(0), SC(0), NC(0)].forEach(a => BANDS.forEach((t, k) => ws.getCell(`${col(a + k)}2`).value = t));
+  for (const [c, t] of Object.entries(SUB)) ws.getCell(`${C(+c)}2`).value = t;
   ws.getRow(1).height = 40; ws.getRow(2).height = 140; ws.getRow(3).height = 15;
 
   // --- тіло
@@ -2162,11 +2191,11 @@ function buildListSheet(wb, p, d) {
     const writeBlock = (vals) => {
       for (const [c, v] of Object.entries(vals)) {
         const cn = +c;
-        const cell = xlCell(ws, `${col(cn)}${top}`, v, {
+        const cell = xlCell(ws, `${C(cn)}${top}`, v, {
           h: cn === 4 || cn === 2 ? "center" : (cn >= 18 ? "right" : "center"),
           bold: cn === 2, size: cn === 4 ? 10 : 11, fmt: cn >= 18 ? XL_MONEY : undefined, border: true });
         if (supNotes[cn]) cell.note = supNotes[cn].join("\n");   // що саме нараховано — у примітці до комірки
-        if (nRows > 1) ws.mergeCells(`${col(cn)}${top}:${col(cn)}${bottom}`);
+        if (nRows > 1) ws.mergeCells(`${C(cn)}${top}:${C(cn)}${bottom}`);
       }
     };
     writeBlock({ 1: e.row_no, 2: nameText, 4: eduText });
@@ -2201,9 +2230,9 @@ function buildListSheet(wb, p, d) {
         : fx(raises.length ? `F${row}+G${row}` : `F${row}`, c.rate_total),
         { h: "right", border: true, fmt: XL_MONEY });
       if (hasRate) bases.push({ expr: `H${row}`, value: rate });
-      for (let b = 0; b < 3; b++) {
+      for (let b = 0; b < NB; b++) {
         const isBand = l.kind === "teaching" && BAND_COL[l.band_code] === b;
-        const hc = `${col(9 + b)}${row}`, sc = `${col(12 + b)}${row}`;
+        const hc = `${col(HC(b))}${row}`, sc = `${col(SC(b))}${row}`;
         xlCell(ws, hc, isBand ? num0(l.hours) : null, { h: "center", border: true, fmt: XL_HOURS });
         // гр. 12–14: = гр.8 / 18 × години
         let sal = null;
@@ -2221,7 +2250,7 @@ function buildListSheet(wb, p, d) {
             ? fx(`${sc}*${p}`, Number(c.notebook_amount))
             : fx(`H${row}/${norm}*${fmtXl(l.notebook_hours)}*${p}`, Number(c.notebook_amount));
         } else if (isBand) nb = nz(c.notebook_amount);
-        xlCell(ws, `${col(15 + b)}${row}`, nb, { h: "right", border: true, fmt: XL_MONEY });
+        xlCell(ws, `${col(NC(b))}${row}`, nb, { h: "right", border: true, fmt: XL_MONEY });
       }
       // посада: гр. 24 у рядку або гр. 23 блоку (= гр.8 × частка; ×0,95 — якщо так у бухгалтера)
       let posCell = null;
@@ -2237,20 +2266,22 @@ function buildListSheet(wb, p, d) {
         if (l.form_column === 23) posTerms23.push(expr ? { expr, value: amount } : { expr: fmtXl(amount), value: amount });
         else posCell = expr ? fx(expr, amount) : num0(c.position_salary);
       }
-      xlCell(ws, `X${row}`, posCell, { h: "right", border: true, fmt: XL_MONEY });
+      xlCell(ws, `${C(24)}${row}`, posCell, { h: "right", border: true, fmt: XL_MONEY });
       if (l.kind === "teaching" && l.notebook_hours && l.notebook_pct) {
-        ws.getCell(`${col(15 + BAND_COL[l.band_code])}${row}`).note =
+        ws.getCell(`${col(NC(BAND_COL[l.band_code]))}${row}`).note =
           `${fmtUa(l.notebook_hours)} год × ${fmtUa(l.notebook_pct)}%`;
       }
     });
     if (!lines.length) {
       xlCell(ws, `C${top}`, [e.category, e.ped_title, e.note].filter(Boolean).join(", "), { h: "center", border: true });
-      for (const cn of [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 24]) xlCell(ws, `${col(cn)}${top}`, null, { border: true });
+      for (let cn = 5; cn < 9 + 3 * NB; cn++) xlCell(ws, `${col(cn)}${top}`, null, { border: true });
+      xlCell(ws, `${C(24)}${top}`, null, { border: true });
     }
     // --- графи блоку (18–23, 25, 26) — формулами, як у вихідному файлі
     const cellNum = a => { const v = ws.getCell(a).value; return typeof v === "number" ? v : (v && typeof v.result === "number" ? v.result : 0); };
     const sumCells = (c0, c1) => { let x = 0; for (let rr = top; rr <= bottom; rr++) for (let cc = c0; cc <= c1; cc++) x += cellNum(`${col(cc)}${rr}`); return x; };
-    const salSum = sumCells(12, 14), nbSum = sumCells(15, 17);
+    const salSum = sumCells(SC(0), SC(NB - 1)), nbSum = sumCells(NC(0), NC(NB - 1));
+    const salRange = `${col(SC(0))}${top}:${col(SC(NB - 1))}${bottom}`, nbRange = `${col(NC(0))}${top}:${col(NC(NB - 1))}${bottom}`;
     const pedTotal = salSum + nbSum;
     // доплата = база × % ; база — ставка рядка, зарплата рядка або «ставка N / 18 × год» (гурток)
     const supExpr = (s, amount) => {
@@ -2281,10 +2312,10 @@ function buildListSheet(wb, p, d) {
       : fx(terms.map(t => t.expr).join("+"), terms.reduce((a, t) => a + t.value, 0));
     // гр. 25 (вислуга, престижність): % від суми певних граф — шукаємо, від яких саме
     const comps = [
-      { key: "sal", expr: `SUM(L${top}:N${bottom})`, value: salSum },
-      { key: "nb", expr: `SUM(O${top}:Q${bottom})`, value: nbSum },
-      ...[19, 20, 21, 22, 23].map(fc => ({ key: "c" + fc, expr: `${col(fc)}${top}`, value: colTerms[fc].reduce((a, t) => a + t.value, 0) })),
-      { key: "c24", expr: `SUM(X${top}:X${bottom})`, value: sumCells(24, 24) }
+      { key: "sal", expr: `SUM(${salRange})`, value: salSum },
+      { key: "nb", expr: `SUM(${nbRange})`, value: nbSum },
+      ...[19, 20, 21, 22, 23].map(fc => ({ key: "c" + fc, expr: `${C(fc)}${top}`, value: colTerms[fc].reduce((a, t) => a + t.value, 0) })),
+      { key: "c24", expr: `SUM(${C(24)}${top}:${C(24)}${bottom})`, value: sumCells(phys(24), phys(24)) }
     ].filter(x => x.value);
     const subsets = [];
     for (let mask = 1; mask < (1 << comps.length); mask++) subsets.push(comps.filter((_, i) => mask & (1 << i)));
@@ -2296,7 +2327,7 @@ function buildListSheet(wb, p, d) {
       if (pct) for (const sub of subsets) {
         if (Math.abs(sub.reduce((x, y) => x + y.value, 0) * pct - a) <= 0.015) {
           const keys = sub.map(x => x.key).sort().join(",");
-          const inner = keys === "nb,sal" ? `R${top}` : sub.map(x => x.expr).join("+");
+          const inner = keys === "nb,sal" ? `${C(18)}${top}` : sub.map(x => x.expr).join("+");
           ex = (sub.length > 1 && keys !== "nb,sal" ? `(${inner})` : inner) + `*${pf(pct)}`;
           break;
         }
@@ -2304,12 +2335,12 @@ function buildListSheet(wb, p, d) {
       terms25.push({ expr: ex || fmtXl(a), value: a });
     }
     writeBlock({
-      18: lines.length ? fx(`SUM(L${top}:Q${bottom})`, pedTotal) : null,
+      18: lines.length ? fx(`SUM(${col(SC(0))}${top}:${col(NC(NB - 1))}${bottom})`, pedTotal) : null,
       19: termCell(colTerms[19]), 20: termCell(colTerms[20]), 21: termCell(colTerms[21]),
       22: termCell(colTerms[22]), 23: termCell(colTerms[23]), 25: termCell(terms25),
-      26: fx(`R${top}+S${top}+T${top}+U${top}+V${top}+W${top}+SUM(X${top}:X${bottom})+Y${top}`,
+      26: fx(`${[18, 19, 20, 21, 22, 23].map(g => C(g) + top).join("+")}+SUM(${C(24)}${top}:${C(24)}${bottom})+${C(25)}${top}`,
              pedTotal + [19, 20, 21, 22, 23].reduce((a, fc) => a + colTerms[fc].reduce((x, t) => x + t.value, 0), 0)
-             + sumCells(24, 24) + terms25.reduce((a, t) => a + t.value, 0))
+             + sumCells(phys(24), phys(24)) + terms25.reduce((a, t) => a + t.value, 0))
     });
 
     // висота рядків: щоб уміщався текст графи 3 і щоб на блок вистачило 3–4 рядків для ПІБ і освіти
@@ -2322,7 +2353,7 @@ function buildListSheet(wb, p, d) {
     const needH = 13 * Math.max(nameText.split("\n").length, estLines(eduText)) + 8;
     if (blockH < needH) ws.getRow(bottom).height += needH - blockH;
     // товстіша лінія між працівниками
-    for (let cn = 1; cn <= 26; cn++) {
+    for (let cn = 1; cn <= TOT; cn++) {
       const cell = ws.getCell(`${col(cn)}${bottom}`);
       cell.border = { ...cell.border, bottom: { style: "medium" } };
     }
@@ -2332,7 +2363,7 @@ function buildListSheet(wb, p, d) {
   // --- підсумок
   const last = r - 1;
   xlCell(ws, `B${r}`, "Разом", { bold: true, border: true });
-  for (let cn = 1; cn <= 26; cn++) {
+  for (let cn = 1; cn <= TOT; cn++) {
     if (cn === 2) continue;
     if (cn < 9 || cn === 1) { xlCell(ws, `${col(cn)}${r}`, null, { border: true }); continue; }
     let res = 0;
@@ -2343,14 +2374,14 @@ function buildListSheet(wb, p, d) {
       if (typeof v === "number") res += v; else if (v && typeof v.result === "number") res += v.result;
     }
     xlCell(ws, `${col(cn)}${r}`, { formula: `SUM(${col(cn)}${firstRow}:${col(cn)}${last})`, result: Math.round(res * 100) / 100 },
-           { h: cn <= 11 ? "center" : "right", bold: true, border: true, fmt: cn <= 11 ? XL_HOURS : XL_MONEY });
+           { h: cn < SC(0) ? "center" : "right", bold: true, border: true, fmt: cn < SC(0) ? XL_HOURS : XL_MONEY });
   }
   ws.getRow(r).height = 22;
 
   r += 3;
   xlCell(ws, `C${r}`, `Директор ____________ ${p.director_name || ""}`, { wrap: false, size: 12 });
-  xlCell(ws, `R${r}`, `Бухгалтер ____________ ${p.accountant_name || ""}`, { wrap: false, size: 12 });
-  ws.pageSetup.printArea = `A1:Z${r}`;
+  xlCell(ws, `${C(18)}${r}`, `Бухгалтер ____________ ${p.accountant_name || ""}`, { wrap: false, size: 12 });
+  ws.pageSetup.printArea = `A1:${col(TOT)}${r}`;
 }
 
 // ------------------------------------------------------------------
@@ -2370,7 +2401,7 @@ const HINTS = {
   6: "Графа 6. Ставка (посадовий оклад) на місяць без підвищень. Заповнює бухгалтер.",
   7: "Графа 7. Розмір підвищень ставки: за звання, науковий ступінь, особливі умови (примітка 2 до форми). Відсотки вносить заступник у рядку працівника, суму рахує програма.",
   8: "Графа 8. Ставка з урахуванням підвищень = графа 6 + графа 7. Рахується автоматично; бухгалтер може вписати своє значення.",
-  9: "Графи 9–11. Тижневі години за трьома колонками (групами класів), назви яких задаються в «⚙ Налаштування форми». Вносить заступник у рядках «години».",
+  9: "Графи 9–11. Тижневі години за колонками (групами класів): I–IV, V–IX, X–XI і, за потреби, окремо «10 (пілот)» (у Excel — графа 11а). Назви задаються в «⚙ Налаштування форми». Вносить заступник у рядках «години».",
   12: "Графи 12–14. Зарплата за години = ставка (гр. 8) ÷ норма годин на ставку × години. Рахується автоматично.",
   15: "Графи 15–17. Доплата за перевірку зошитів = ставка ÷ норма × години із зошитами × %. Години й % вносить заступник.",
   18: "Графа 18. Всього педагогічна зарплата = графи 12–17. Рахується автоматично.",
@@ -2684,7 +2715,7 @@ async function renderExportStep() {
        Формат друку — <b>А3, альбомна орієнтація</b>, шапка граф повторюється на кожній сторінці.</p>
     <div class="stat-row">
       <div class="stat"><b>${data.entries.length}</b><span>працівників</span></div>
-      <div class="stat"><b>${fmtUa(sum("h_1_4") + sum("h_5_9") + sum("h_10_12"))}</b><span>годин на тиждень (гр. 9–11)</span></div>
+      <div class="stat"><b>${fmtUa(sum("h_all"))}</b><span>годин на тиждень (гр. 9–11)</span></div>
       <div class="stat"><b>${money(sum("ped_total"))}</b><span>педагогічна зарплата (гр. 18)</span></div>
       <div class="stat"><b>${money(sum("grand_total"))}</b><span>всього на місяць (гр. 26)</span></div>
     </div>
@@ -2730,7 +2761,7 @@ function renderHelp() {
        (категорії й звання — актуальні з реєстру). Ставки бухгалтер вносить заново або кнопкою «Підставити ставки за однаковим розрядом».</p>
 
     <h3>Налаштування під свій заклад</h3>
-    <p>«⚙ Налаштування форми»: назви трьох колонок (напр. «5–9», «10 (пілот)», «10–11 (без пілоту)») і перелік рядків таблиці показників —
+    <p>«⚙ Налаштування форми»: назви колонок груп класів (напр. I–IV, V–IX, X–XI (без пілоту) і окремо «10 (пілот)»), які з них показувати, і перелік рядків таблиці показників —
        додавайте, перейменовуйте, ховайте; складову можна зробити автоматичною сумою рядків поділу. Налаштування спільні для всіх тарифікацій закладу.</p>
 
     <h3>Підказки</h3>
