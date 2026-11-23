@@ -105,7 +105,7 @@
   .stat span { font-size: 12px; color: var(--ink-soft); }
   .issue { display: grid; grid-template-columns: 20px 1fr; gap: 6px; padding: 5px 0; font-size: 13px;
            border-bottom: 1px solid var(--line-soft); }
-  .issue.err b { color: var(--err); } .issue.warn b { color: var(--warn); }
+  .issue.err b { color: var(--err); } .issue.warn b { color: var(--warn); } .issue.info b { color: var(--accent); }
 
   /* ---- сітка табеля ---- */
   .sheet-wrap { overflow: auto; max-height: 72vh; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
@@ -365,6 +365,14 @@ function absenceFor(absences, row, iso, wd) {
   return best;
 }
 
+/* Тарифікація на дату: останній знімок з on_date ≤ дата.
+   tariff: [{ on_date, t: { teacher_id: { teach, club, pos: [{ name, rate }] } } }] */
+function tariffFor(tariff, teacherId, iso) {
+  let best = null;
+  for (const p of tariff || []) if (p.on_date <= iso && (!best || p.on_date > best.on_date)) best = p;
+  return best ? best.t[teacherId] || null : null;
+}
+
 /* Розрахунок місяця.
    data: { rows, weeks, absences, subs, overrides, calendar, codes, teachers }
    opt:  { sheet: 'ped' | 'staff', toDay: число — для проміжного табеля }
@@ -437,8 +445,24 @@ function computeMonth(y, m, data, opt = {}) {
     }
     if (!anyWeek) issues.push({ level: "warn", text: `${tName[row.teacher_id] || "?"} (${row.position}): немає графіка годин на цей місяць — у днях «Р» без годин.` });
     const wEnd = weekFor(data.weeks || [], row.id, last);   // навантаження — тижневі години за графіком на кінець періоду
-    const load = wEnd && wEnd.kind === "week" ? wEnd.hours.reduce((a, x) => a + num(x), 0) : null;
-    const rate = row.rate == null || row.rate === "" ? null : num(row.rate);
+    const graphLoad = wEnd && wEnd.kind === "week" ? wEnd.hours.reduce((a, x) => a + num(x), 0) : null;
+    let load = graphLoad;
+    let rate = row.rate == null || row.rate === "" ? null : num(row.rate);
+    // Тарифікація, чинна на кінець періоду: навантаження вчителя, гуртки, ставка посади
+    const tf = tariffFor(data.tariff, row.teacher_id, last);
+    const who = `${tName[row.teacher_id] || "?"} (${row.position})`;
+    if (tf) {
+      const p = String(row.position || "").toLowerCase().trim();
+      if (/гурт/.test(p)) load = tf.club || null;
+      else if (/^вчител/.test(p)) load = tf.teach || null;
+      else {
+        const pl = tf.pos.find(x => p.startsWith(x.name) || x.name.startsWith(p));
+        if (pl) { if (rate == null) rate = pl.rate; load = null; }
+      }
+      if ((/гурт/.test(p) || /^вчител/.test(p)) && graphLoad != null && load != null && Math.abs(graphLoad - load) >= 1)
+        issues.push({ level: "info", text: `${who}: у графіку ${fmtH(graphLoad)} год/тиж, за тарифікацією ${fmtH(load)}.` });
+    } else if ((data.tariff || []).some(t => t.on_date <= last) && sheet === "ped" && /^вчител/i.test(row.position || ""))
+      issues.push({ level: "info", text: `${who}: немає в тарифікації — навантаження взято з графіка.` });
     out.push({ row, name: tName[row.teacher_id] || "?", position: row.position, rate, load, cells, tot });
   }
 
@@ -476,6 +500,25 @@ function overlapDays(a, b) {
   return dayNo(to) - dayNo(from) + 1;
 }
 const addDaysIso = (iso, k) => new Date((dayNo(iso) + k) * 864e5).toISOString().slice(0, 10);
+
+// Тарифікація з таблиць модуля «Навантаження і тарифікація» → [{ on_date, t }]
+function buildTariff(periods, entries, lines, sups, stypes) {
+  const club = new Set((stypes || []).filter(x => /гурт/i.test(x.name)).map(x => x.id));
+  const byEntry = {};
+  const out = (periods || []).map(p => ({ on_date: p.on_date, t: {} }));
+  const P = {}; (periods || []).forEach((p, i) => P[p.id] = out[i]);
+  for (const e of entries || []) {
+    if (!e.teacher_id || !P[e.period_id]) continue;
+    byEntry[e.id] = P[e.period_id].t[e.teacher_id] ||= { teach: 0, club: 0, pos: [] };
+  }
+  for (const l of lines || []) {
+    const x = byEntry[l.entry_id]; if (!x) continue;
+    if (l.kind === "teaching") x.teach += num(l.hours);
+    else if (l.kind === "position") x.pos.push({ name: String(l.position_name || "").toLowerCase().trim(), rate: num(l.rate_fraction) });
+  }
+  for (const s of sups || []) { const x = byEntry[s.entry_id]; if (x && club.has(s.type_id)) x.club += num(s.hours); }
+  return out;
+}
 
 // Як показати клітинку: код і рядок годин («n+k»)
 function cellText(cell) {
@@ -552,7 +595,7 @@ function parsePfu(text) {
 }
 
 if (typeof module !== "undefined") module.exports = { posLabel, fmtRate, monthDays, weekFor, schedFor, absenceFor, computeMonth, cellText, vacationEnd, overlapDays, addDaysIso,
-  makeSnapshot, diffSnapshots, diffDays, normName, parsePfu, isoDate, uaDate, fmtH, MONTHS, GROUPS };
+  makeSnapshot, diffSnapshots, diffDays, normName, parsePfu, isoDate, uaDate, fmtH, MONTHS, GROUPS, tariffFor, buildTariff };
 </script>
 
 <!-- =================================================================
@@ -565,7 +608,7 @@ let sb = null;
 const S = {
   role: null, ym: null, sheet: "ped",   // ym: { y, m }; sheet: ped | staff
   holidays: [],
-  settings: null, codes: [], teachers: [], rows: [], weeks: [], calendar: [],
+  settings: null, codes: [], teachers: [], rows: [], weeks: [], calendar: [], tariff: [],
   absences: [], subs: [], overrides: [], sheets: [],
   res: null, tab: "sheet"
 };
@@ -648,6 +691,15 @@ async function loadStatic() {
   }
   [S.settings, S.codes, S.teachers, S.rows, S.weeks] = q.map(x => x.data);
   S.holidays = (q[5].data || []).map(x => x.day);
+  // тарифікація (якщо модуль є і доступний) — навантаження вчителів і ставки посад
+  const tq = await Promise.all([
+    sb.from("tariff_period").select("id, on_date"),
+    sb.from("tariff_entry").select("id, period_id, teacher_id"),
+    sb.from("tariff_line").select("entry_id, kind, position_name, rate_fraction, hours").range(0, 9999),
+    sb.from("tariff_supplement").select("entry_id, type_id, hours").range(0, 9999),
+    sb.from("supplement_type").select("id, name")
+  ]);
+  S.tariff = tq.some(x => x.error) ? [] : buildTariff(...tq.map(x => x.data));
   S.settings ||= {};
   return true;
 }
@@ -769,8 +821,10 @@ function renderSheet() {
 
   const iss = res.issues;
   document.getElementById("issues").innerHTML = iss.length ? `<div class="card" style="padding:10px 16px;">
-      <b style="font-weight:500;">Перевірка: ${iss.filter(i => i.level === "err").length} помилок, ${iss.filter(i => i.level === "warn").length} попереджень</b>
-      ${iss.map(i => `<div class="issue ${i.level}"><b>${i.level === "err" ? "✕" : "!"}</b><span>${esc(i.text)}</span></div>`).join("")}
+      <b style="font-weight:500;">Перевірка: ${iss.filter(i => i.level === "err").length} помилок, ${iss.filter(i => i.level === "warn").length} попереджень${iss.some(i => i.level === "info") ? `, ${iss.filter(i => i.level === "info").length} зауважень` : ""}</b>
+      ${iss.filter(i => i.level !== "info").map(i => `<div class="issue ${i.level}"><b>${i.level === "err" ? "✕" : "!"}</b><span>${esc(i.text)}</span></div>`).join("")}
+      ${iss.some(i => i.level === "info") ? `<details style="margin-top:4px;"><summary style="cursor:pointer;font-size:13px;color:var(--ink-soft);">Графік і тарифікація: ${iss.filter(i => i.level === "info").length} розбіжностей (у табелі навантаження — за тарифікацією)</summary>
+        ${iss.filter(i => i.level === "info").map(i => `<div class="issue info"><b>i</b><span>${esc(i.text)}</span></div>`).join("")}</details>` : ""}
     </div>` : "";
 
   if (!res.rows.length) {
