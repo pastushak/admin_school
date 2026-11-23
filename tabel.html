@@ -1518,19 +1518,23 @@ function buildWorkbook(ExcelJSLib, snap, rowsToShow, opt) {
   const wb = new ExcelJSLib.Workbook();
   wb.creator = "admin_school · табель";
   const ws = wb.addWorksheet("Табель", {
-    pageSetup: { paperSize: paper === "A3" ? 8 : 9, orientation: "landscape", fitToPage: true,
-                 fitToWidth: paper === "A3x2" ? 2 : 1, fitToHeight: 0,
-                 margins: { left: 0.31, right: 0.2, top: 0.55, bottom: 0.4, header: 0.2, footer: 0.2 },
-                 printTitlesRow: "10:22" },
+    pageSetup: { paperSize: paper === "A3" ? 8 : 9, orientation: "landscape",
+                 margins: { left: 0.31, right: 0.31, top: 0.55, bottom: 0.55, header: 0.3, footer: 0.3 } },
     views: [{ showGridLines: false }]
   });
   // ширини
-  const W = { A: 2.55, B: showTab ? 6 : 1.2, C: 1.2, D: 33.11, E: rmode === "none" ? 1.5 : rmode === "both" && one ? 7 : rmode === "load" ? 5 : 4.6, AJ: 3.33, AK: 3.2, AL: 4.6, AM: 3.4, AN: 3.0, AO: 3.0, AP: 3.0,
-              AQ: 1.2, AR: 1.2, AS: 4.11, AT: 4.0, AU: 4.0, AV: 4.0, AW: 4.0, AX: 4.0, AY: 4.0, AZ: 4.0, BA: 4.0, BB: 6.66 };
+  // ширини й приховані колонки — як у файлі EasyTimesheet
+  const W = { A: 2.55, B: 6, C: 2.11, D: 29.78, E: rmode === "both" && one ? 7 : rmode === "load" ? 5 : 4.6, AK: 2.89,
+              AL: 4.11, AM: 4.11, AN: 4.11, AO: 4.11, AP: 4.11, AQ: 2.89, AR: 4.11,
+              AS: 4.11, AT: 4.11, AU: 4.11, AV: 4.11, AW: 4.11, AX: 4.11, AY: 4.11, AZ: 4.0, BA: 4.0, BB: 6.66 };
   for (let c = 1; c <= colNum("BB"); c++) {
     const L = colLetter(c);
     ws.getColumn(c).width = W[L] ?? (c >= 6 && c <= 36 ? (one ? 3.6 : 3.33) : 4);
   }
+  const hide = ["C", "AQ", "AR"];
+  if (!showTab) hide.push("B");
+  if (rmode === "none") hide.push("E");
+  for (const L of hide) ws.getColumn(L).hidden = true;
   // скорочена форма: без нічних, вечірніх, святкових, службових колонок і окладу
   if (form !== "full") for (const L of ["AN", "AO", "AP", "AQ", "AR", "BB"]) ws.getColumn(L).hidden = true;
 
@@ -1622,7 +1626,25 @@ function buildWorkbook(ExcelJSLib, snap, rowsToShow, opt) {
   let r = 23;
   const sumCell = (addr, v, size = 9) => cell(addr, v === 0 || v === "" || v == null ? null : v, { size, border: true });
   const span = one ? 0 : 1;
+  /* Розриви сторінок: рядки одного працівника не розриваються між аркушами.
+     Висота аркуша в пунктах з урахуванням масштабу «вмістити по ширині». */
+  // ширина аркуша в пунктах (як рахує Excel: ширина × 7 пікселів + 5) → явний масштаб друку
+  const sheetW = [...Array(colNum("BB")).keys()].map(i => ws.getColumn(i + 1))
+    .reduce((a, c) => a + (c.hidden ? 0 : (Math.trunc((c.width || 8.43) * 7) + 5) * 0.75), 0);
+  const pg = paper === "A3" ? [1190.55, 841.89] : [841.89, 595.28];
+  const usableW = pg[0] - 0.62 * 72, usableH = pg[1] - 1.1 * 72 - 6;
+  const scalePct = Math.min(100, Math.floor(100 * (paper === "A3x2" ? 2 : 1) * usableW / sheetW));
+  ws.pageSetup.scale = scalePct;
+  const pageH = usableH * 100 / scalePct;
+  const headH = 12 + 19.5 * 7 + 9 + 14.25 * 13;
+  const personH = (one ? 24 : 14.25 * 2);
+  let used = headH;
   rows.forEach((x, i) => {
+    if (i > 0 && used + personH > pageH) {
+      ws.getRow(r - 1).addPageBreak();
+      used = 0;
+    }
+    used += personH;
     for (let k = 0; k <= span; k++) ws.getRow(r + k).height = one ? 24 : 14.25;
     const R2 = col => `${col}${r}:${col}${r + span}`;
     merge(R2("A"), i + 1, { size: 9, border: true });
