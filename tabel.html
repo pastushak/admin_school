@@ -1,0 +1,1762 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Табель робочого часу</title>
+
+<!--
+  ТАБЕЛЬ ОБЛІКУ ВИКОРИСТАННЯ РОБОЧОГО ЧАСУ ПЕДАГОГІЧНИХ ПРАЦІВНИКІВ
+  ------------------------------------------------------------------
+  Окрема сторінка застосунку admin_school (лежить поруч з index.html).
+  Підключення до Supabase і вхід — спільні з index.html (той самий браузер
+  пам'ятає URL, ключ і сесію). Таблиці — у tabel_stage1.sql.
+
+  Як рахується клітинка дня (згори вниз, перше, що спрацювало):
+    1. дата поза періодом роботи на посаді (прийом/звільнення) → порожньо
+    2. ручна правка клітинки (ts_override)
+    3. вихідний за календарем (сб, нд або виняток у ts_calendar) → X
+    4. неявка, що покриває дату (ts_absence) → її код, години за розкладом
+    5. інакше → Р; години за розкладом дня тижня (0 → «Р» без годин)
+       + заміни цього дня → «n+k»
+
+  СТРУКТУРА ФАЙЛУ:
+    1. <style>
+    2. HTML: налаштування підключення / вхід / робочий екран
+    3. <script id="core"> — чисті функції розрахунку (без сторінки, їх можна тестувати)
+    4. <script> — інтерфейс і робота з базою
+    5. <script> — експорт у Excel за формою
+-->
+
+<style>
+  :root {
+    --ink: #1a2332; --ink-soft: #5a6472; --line: #d8dde5; --line-soft: #eef1f5;
+    --paper: #ffffff; --field: #f4f6f9; --accent: #1b4d7a;
+    --ok: #216e39; --ok-bg: #e6f4ea; --warn: #8a5a00; --warn-bg: #fdf3e0;
+    --err: #a52222; --err-bg: #fbeaea; --radius: 8px;
+    --c-x: #eceff3; --c-tn: #fbe3e3; --c-abs: #fdf0d9; --c-zam: #e3f0e6;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Segoe UI", "Roboto", system-ui, sans-serif; color: var(--ink);
+         background: #eef1f5; line-height: 1.5; font-size: 15px; }
+  .wrap { max-width: 1600px; margin: 0 auto; padding: 20px 20px 80px; }
+  header.bar { background: var(--accent); color: #fff; padding: 12px 20px;
+               display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  header.bar h1 { font-size: 17px; font-weight: 500; margin: 0; }
+  header.bar a { color: #fff; opacity: .85; font-size: 13px; text-decoration: none; margin-right: 12px; }
+  header.bar a:hover { opacity: 1; text-decoration: underline; }
+  header.bar .who { font-size: 13px; opacity: .9; }
+  header.bar button { background: rgba(255,255,255,.15); color: #fff; border: 1px solid rgba(255,255,255,.35);
+                      padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  .card { background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius);
+          padding: 18px 20px; margin-bottom: 16px; }
+  h2 { font-size: 16px; font-weight: 500; margin: 0 0 12px; }
+  h3 { font-size: 14px; font-weight: 500; margin: 16px 0 6px; color: var(--accent); }
+  label { display: block; font-size: 13px; color: var(--ink-soft); margin: 10px 0 4px; }
+  input, select, textarea { width: 100%; padding: 7px 10px; font-size: 14px; border: 1px solid var(--line);
+    border-radius: 6px; background: var(--field); color: var(--ink); font-family: inherit; }
+  textarea { min-height: 140px; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+  input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  input:disabled, select:disabled { background: transparent; border-color: transparent; }
+  button.primary { background: var(--accent); color: #fff; border: none; padding: 8px 16px; font-size: 14px;
+                   border-radius: 6px; cursor: pointer; font-family: inherit; }
+  button.primary:hover { background: #163e63; }
+  button.primary:disabled { background: #9aa7b5; cursor: default; }
+  .btn { background: var(--paper); border: 1px solid var(--line); border-radius: 6px; cursor: pointer;
+         padding: 6px 12px; font-size: 13px; color: var(--ink); font-family: inherit; white-space: nowrap; }
+  .btn:hover { background: var(--field); }
+  .btn.danger:hover { color: var(--err); border-color: var(--err); }
+  .x-btn { background: none; border: none; color: var(--ink-soft); cursor: pointer; font-size: 16px; padding: 0 6px; }
+  .x-btn:hover { color: var(--err); }
+  .hint { font-size: 13px; color: var(--ink-soft); margin: 4px 0 0; }
+  .msg { margin-top: 10px; padding: 9px 12px; border-radius: 6px; font-size: 13px; display: none; }
+  .msg.err { background: var(--err-bg); color: var(--err); display: block; }
+  .msg.ok  { background: var(--ok-bg); color: var(--ok); display: block; }
+  .msg.warn { background: var(--warn-bg); color: var(--warn); display: block; }
+  .loading { color: var(--ink-soft); padding: 16px 0; }
+  #screen-app, #screen-login { display: none; }
+
+  .toolbar { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+  .toolbar .f { min-width: 150px; }
+  .toolbar label { margin-top: 0; }
+  .tabs { display: flex; gap: 2px; border-bottom: 2px solid var(--line); margin: 16px 0; flex-wrap: wrap; }
+  .tabs button { background: none; border: none; padding: 9px 14px; font-size: 14px; cursor: pointer;
+                 color: var(--ink-soft); border-bottom: 2px solid transparent; margin-bottom: -2px; font-family: inherit; }
+  .tabs button:hover { color: var(--ink); }
+  .tabs button.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 500; }
+  .tabs .cnt { font-size: 11px; background: var(--line-soft); border-radius: 9px; padding: 0 6px; margin-left: 4px; }
+  .panel { display: none; } .panel.active { display: block; }
+  .grid2 { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 0 14px; }
+
+  table.t { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.t th { text-align: left; font-weight: 500; color: var(--ink-soft); border-bottom: 2px solid var(--line);
+               padding: 6px 8px; font-size: 12px; vertical-align: bottom; }
+  table.t td { padding: 5px 8px; border-bottom: 1px solid var(--line-soft); vertical-align: middle; }
+  table.t input, table.t select { padding: 4px 6px; font-size: 13px; }
+  table.t input.h { width: 54px; text-align: center; }
+  .badge { font-size: 12px; padding: 1px 9px; border-radius: 10px; white-space: nowrap; }
+  .badge.ok { background: var(--ok-bg); color: var(--ok); }
+  .badge.warn { background: var(--warn-bg); color: var(--warn); }
+  .badge.err { background: var(--err-bg); color: var(--err); }
+  .badge.info { background: #e7eef7; color: var(--accent); }
+  .stat-row { display: flex; flex-wrap: wrap; gap: 10px; margin: 4px 0 12px; }
+  .stat { background: var(--field); border-radius: 8px; padding: 8px 14px; min-width: 120px; }
+  .stat b { display: block; font-size: 18px; font-weight: 500; }
+  .stat span { font-size: 12px; color: var(--ink-soft); }
+  .issue { display: grid; grid-template-columns: 20px 1fr; gap: 6px; padding: 5px 0; font-size: 13px;
+           border-bottom: 1px solid var(--line-soft); }
+  .issue.err b { color: var(--err); } .issue.warn b { color: var(--warn); }
+
+  /* ---- сітка табеля ---- */
+  .sheet-wrap { overflow: auto; max-height: 72vh; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+  table.sheet { border-collapse: separate; border-spacing: 0; font-size: 12px; }
+  table.sheet th, table.sheet td { border-right: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft);
+       padding: 0; text-align: center; }
+  table.sheet thead th { position: sticky; top: 0; background: #f6f8fb; z-index: 2; font-weight: 500;
+       color: var(--ink-soft); padding: 4px 0; font-size: 11px; }
+  table.sheet thead th.we { color: #a0a8b4; }
+  table.sheet .nm { position: sticky; left: 0; background: #fff; z-index: 1; text-align: left; padding: 3px 8px;
+       min-width: 230px; max-width: 260px; border-right: 2px solid var(--line); }
+  table.sheet thead th.nm { z-index: 3; background: #f6f8fb; }
+  table.sheet .nm b { font-weight: 500; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  table.sheet .nm span { font-size: 11px; color: var(--ink-soft); display: block; white-space: nowrap;
+       overflow: hidden; text-overflow: ellipsis; }
+  table.sheet td.d { width: 31px; min-width: 31px; height: 38px; cursor: pointer; line-height: 1.15; }
+  table.sheet td.d:hover { box-shadow: inset 0 0 0 2px var(--accent); }
+  table.sheet td.d .c { display: block; font-weight: 500; }
+  table.sheet td.d .h { display: block; color: var(--ink-soft); font-size: 11px; }
+  table.sheet td.d.x { background: var(--c-x); color: #9aa3ae; }
+  table.sheet td.d.tn { background: var(--c-tn); }
+  table.sheet td.d.abs { background: var(--c-abs); }
+  table.sheet td.d.zam .h { color: var(--ok); font-weight: 600; }
+  table.sheet td.d.ovr { box-shadow: inset 0 0 0 2px #c58a00; }
+  table.sheet td.d.out { background: repeating-linear-gradient(135deg, #fff, #fff 4px, #f1f3f6 4px, #f1f3f6 8px); cursor: default; }
+  table.sheet td.sum { padding: 2px 6px; font-variant-numeric: tabular-nums; background: #fafbfd; min-width: 38px; }
+  table.sheet td.sum.first { border-left: 2px solid var(--line); }
+  table.sheet tr.changed td.nm { box-shadow: inset 4px 0 0 #c58a00; }
+  table.sheet tfoot td { position: sticky; bottom: 0; background: #f6f8fb; font-weight: 500; padding: 6px 4px; z-index: 2; }
+  table.sheet tfoot td.nm { z-index: 3; }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--ink-soft); margin: 8px 0 0; }
+  .legend i { display: inline-block; width: 14px; height: 14px; border-radius: 3px; vertical-align: -2px; margin-right: 4px;
+              border: 1px solid var(--line); }
+
+  /* спливаюче вікно редагування клітинки */
+  .pop { position: fixed; z-index: 50; background: #fff; border: 1px solid var(--line); border-radius: 8px;
+         box-shadow: 0 8px 28px rgba(20,30,50,.18); padding: 12px 14px; width: 290px; font-size: 13px; }
+  .pop h4 { margin: 0 0 4px; font-size: 14px; font-weight: 500; }
+  .pop .src { color: var(--ink-soft); font-size: 12px; margin-bottom: 8px; }
+  .pop .row2 { display: grid; grid-template-columns: 1fr 80px; gap: 8px; }
+  .pop .acts { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+  .help p, .help li { font-size: 14px; }
+  .help ol, .help ul { padding-left: 22px; }
+  .diff-list { font-size: 13px; margin: 6px 0 0; padding-left: 18px; }
+</style>
+</head>
+<body>
+
+<!-- ============ ЕКРАН 1: підключення ============ -->
+<div id="screen-setup" class="wrap">
+  <div class="card" style="max-width:560px;">
+    <h2>Підключення до бази</h2>
+    <p class="hint">Якщо ви вже входили в «Навантаження і тарифікацію» в цьому браузері, цей крок не з'явиться.
+      Значення — у Supabase: <b>Settings → API</b>.</p>
+    <label for="cfg-url">Project URL</label>
+    <input id="cfg-url" placeholder="https://xxxx.supabase.co" autocomplete="off">
+    <label for="cfg-key">anon public key</label>
+    <input id="cfg-key" placeholder="eyJhbGciOi..." autocomplete="off">
+    <button class="primary" style="margin-top:14px;" onclick="saveConfig()">Зберегти й підключитися</button>
+    <div id="setup-msg" class="msg"></div>
+  </div>
+</div>
+
+<!-- ============ ЕКРАН 2: вхід ============ -->
+<div id="screen-login" class="wrap">
+  <div class="card" style="max-width:420px;margin-top:40px;">
+    <h2>Вхід</h2>
+    <label for="login-email">Електронна пошта</label>
+    <input id="login-email" type="email" autocomplete="username">
+    <label for="login-pass">Пароль</label>
+    <input id="login-pass" type="password" autocomplete="current-password"
+           onkeydown="if(event.key==='Enter')doLogin()">
+    <button class="primary" style="margin-top:14px;" onclick="doLogin()">Увійти</button>
+    <div id="login-msg" class="msg"></div>
+  </div>
+</div>
+
+<!-- ============ ЕКРАН 3: робочий ============ -->
+<div id="screen-app">
+  <header class="bar">
+    <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+      <h1>Табель робочого часу</h1>
+      <a href="index.html">← Навантаження і тарифікація</a>
+    </div>
+    <div style="display:flex;align-items:center;gap:12px;">
+      <span class="who" id="who"></span>
+      <button onclick="doLogout()">Вийти</button>
+    </div>
+  </header>
+
+  <div class="wrap">
+    <div class="card" style="padding:14px 18px;">
+      <div class="toolbar">
+        <div class="f" style="min-width:200px;">
+          <label for="sel-sheet">Табель</label>
+          <select id="sel-sheet" onchange="selectSheet(this.value)">
+            <option value="ped">педагогічних працівників</option>
+            <option value="staff">обслуговуючого персоналу</option>
+          </select>
+        </div>
+        <div class="f" style="min-width:170px;">
+          <label for="sel-month">Місяць</label>
+          <input type="month" id="sel-month" onchange="selectMonth(this.value)">
+        </div>
+        <div style="display:flex;gap:6px;padding-bottom:2px;">
+          <button class="btn" onclick="shiftMonth(-1)" title="Попередній місяць">‹</button>
+          <button class="btn" onclick="shiftMonth(1)" title="Наступний місяць">›</button>
+        </div>
+        <div class="f">
+          <label for="exp-kind">Вид табеля</label>
+          <select id="exp-kind" onchange="document.getElementById('exp-to-box').style.display = this.value === 'проміжний' ? '' : 'none'">
+            <option value="звичайний">звичайний</option>
+            <option value="проміжний">проміжний (частина місяця)</option>
+            <option value="коригуючий">коригуючий (лише змінені рядки)</option>
+            <option value="уточнюючий">уточнюючий (повний)</option>
+          </select>
+        </div>
+        <div class="f" id="exp-to-box" style="display:none;min-width:90px;">
+          <label for="exp-to">по число</label>
+          <input id="exp-to" type="number" min="1" max="31" value="15">
+        </div>
+        <div class="f">
+          <label for="exp-date">Дата заповнення</label>
+          <input type="date" id="exp-date">
+        </div>
+        <button class="primary" onclick="exportXlsx()">⬇ Excel за формою</button>
+        <button class="btn" id="btn-submit" onclick="submitSheet()" title="Зберегти знімок того, що подано в Департамент">✔ Зафіксувати як поданий</button>
+        <span id="month-status" style="padding-bottom:6px;"></span>
+      </div>
+    </div>
+
+    <div class="tabs" id="tabs">
+      <button data-tab="sheet" class="active" onclick="switchTab('sheet')">Табель</button>
+      <button data-tab="abs" onclick="switchTab('abs')">Неявки<span class="cnt" id="cnt-abs"></span></button>
+      <button data-tab="zam" onclick="switchTab('zam')">Заміни<span class="cnt" id="cnt-zam"></span></button>
+      <button data-tab="pfu" onclick="switchTab('pfu')">ЛН з ПФУ</button>
+      <button data-tab="rows" onclick="switchTab('rows')">Працівники і графік</button>
+      <button data-tab="ver" onclick="switchTab('ver')">Подані табелі<span class="cnt" id="cnt-ver"></span></button>
+      <button data-tab="cfg" onclick="switchTab('cfg')">⚙ Налаштування</button>
+      <button data-tab="help" onclick="switchTab('help')">? Як працювати</button>
+    </div>
+
+    <div id="tab-sheet" class="panel active">
+      <div class="stat-row" id="stats"></div>
+      <div id="issues"></div>
+      <div class="sheet-wrap" id="sheet-area"><div class="loading" style="padding:16px;">Завантаження…</div></div>
+      <div class="legend">
+        <span><i style="background:var(--c-x)"></i>X — вихідний</span>
+        <span><i style="background:var(--c-tn)"></i>ТН — лікарняний</span>
+        <span><i style="background:var(--c-abs)"></i>інші неявки</span>
+        <span><i style="background:#fff;box-shadow:inset 0 0 0 2px #c58a00"></i>ручна правка</span>
+        <span><b style="color:var(--ok)">n+k</b> — заміни</span>
+        <span><i style="background:repeating-linear-gradient(135deg,#fff,#fff 3px,#e5e8ec 3px,#e5e8ec 6px)"></i>поза періодом роботи</span>
+        <span>Клацніть клітинку, щоб змінити її вручну.</span>
+      </div>
+    </div>
+    <div id="tab-abs" class="panel"><div class="card" id="abs-area"></div></div>
+    <div id="tab-zam" class="panel"><div class="card" id="zam-area"></div></div>
+    <div id="tab-pfu" class="panel"><div class="card" id="pfu-area"></div></div>
+    <div id="tab-rows" class="panel"><div class="card" id="rows-area"></div></div>
+    <div id="tab-ver" class="panel"><div class="card" id="ver-area"></div></div>
+    <div id="tab-cfg" class="panel"><div class="card" id="cfg-area"></div></div>
+    <div id="tab-help" class="panel"><div class="card help" id="help-area"></div></div>
+  </div>
+</div>
+<div id="pop" class="pop" style="display:none;"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
+
+<!-- =================================================================
+     ЯДРО: чисті функції (не торкаються сторінки й бази)
+     ================================================================= -->
+<script id="core">
+"use strict";
+
+const MONTHS = ["СІЧЕНЬ", "ЛЮТИЙ", "БЕРЕЗЕНЬ", "КВІТЕНЬ", "ТРАВЕНЬ", "ЧЕРВЕНЬ",
+  "ЛИПЕНЬ", "СЕРПЕНЬ", "ВЕРЕСЕНЬ", "ЖОВТЕНЬ", "ЛИСТОПАД", "ГРУДЕНЬ"];
+const WD_SHORT = ["пн", "вт", "ср", "чт", "пт", "сб", "нд"];
+// колонки «з причин за місяць» у формі
+const GROUPS = ["AT", "AU", "AV", "AW", "AX", "AY", "AZ", "BA"];
+
+const pad2 = n => String(n).padStart(2, "0");
+const isoDate = (y, m, d) => `${y}-${pad2(m)}-${pad2(d)}`;     // m: 1..12
+const uaDate = iso => iso ? `${iso.slice(8, 10)}.${iso.slice(5, 7)}.${iso.slice(0, 4)}` : "";
+const num = v => (v === null || v === undefined || v === "" ? 0 : Number(v));
+const fmtH = x => { const n = Math.round(Number(x) * 10) / 10; return Number.isInteger(n) ? String(n) : String(n).replace(".", ","); };
+const fmtRate = x => String(Math.round(Number(x) * 100) / 100).replace(".", ",");
+// Посада зі ставкою й навантаженням для друку: mode = none | rate | load | both
+function posLabel(position, rate, load, mode) {
+  const add = [];
+  if ((mode === "rate" || mode === "both") && rate) add.push(`${fmtRate(rate)} ст.`);
+  if ((mode === "load" || mode === "both") && load) add.push(`${fmtH(load)} год/тиж`);
+  return add.length ? `${position}, ${add.join(", ")}` : position;
+}
+
+// Опис місяця: дні з днем тижня (0 = пн … 6 = нд), ознакою робочого дня за календарем,
+// святковим днем і скороченням (передсвятковий день)
+function monthDays(y, m, calendar) {
+  const cal = {};
+  for (const c of calendar || []) cal[c.day] = c;
+  const n = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const days = [];
+  for (let d = 1; d <= n; d++) {
+    const iso = isoDate(y, m, d);
+    const wd = (new Date(Date.UTC(y, m - 1, d)).getUTCDay() + 6) % 7;
+    const ex = cal[iso];
+    days.push({ d, iso, wd, work: ex ? !!ex.is_workday : wd < 5, exc: !!ex,
+                holiday: !!ex?.is_holiday, short: ex ? num(ex.short_hours) : 0, note: ex?.note || "" });
+  }
+  return days;
+}
+
+// Графік рядка, чинний на дату: останній запис з valid_from ≤ дата
+function weekFor(weeks, rowId, iso) {
+  let best = null;
+  for (const w of weeks) {
+    if (w.row_id !== rowId || w.valid_from > iso) continue;
+    if (!best || w.valid_from > best.valid_from) best = w;
+  }
+  return best;
+}
+const dayNo = iso => Math.round(Date.UTC(+iso.slice(0, 4), +iso.slice(5, 7) - 1, +iso.slice(8, 10)) / 864e5);
+
+/* Що каже графік про день: { works, h, night, eve, hol }
+   works — чи день робочий для працівника; h — години; hol — з них у святковий день */
+function schedFor(week, day) {
+  if (!week) return { works: day.work, h: 0, night: 0, eve: 0, hol: 0 };
+  const arr = k => week[k] || null;
+  let i;
+  if (week.kind === "cycle") {
+    const N = week.hours.length;
+    i = (((dayNo(day.iso) - dayNo(week.cycle_start)) % N) + N) % N;
+  } else i = day.wd;
+  let h = num(week.hours[i]);
+  const night = num(arr("night")?.[i]), eve = num(arr("evening")?.[i]);
+  let works;
+  if (week.kind === "cycle") works = h > 0;
+  else if (day.work) works = h > 0 || !week.zero_off;
+  else works = !day.exc && h > 0;            // вихідний за календарем: працює лише якщо в графіку є години (не свято)
+  if (works && day.short && week.kind !== "cycle" && h > 0) h = Math.max(0, h - day.short);
+  return { works, h, night: works ? night : 0, eve: works ? eve : 0, hol: works && day.holiday ? h : 0 };
+}
+
+const SICK = new Set(["ТН", "ТП"]);
+// Неявка на дату. Пріоритет: лікарняний > неявка саме цього рядка > на всього працівника > новіша
+function absenceFor(absences, row, iso, wd) {
+  let best = null;
+  for (const a of absences) {
+    if (a.date_from > iso || a.date_to < iso) continue;
+    if (a.row_id != null && a.row_id !== row.id) continue;
+    if (a.row_id == null && a.teacher_id !== row.teacher_id) continue;
+    if (a.weekdays && a.weekdays.length && !a.weekdays.includes(wd + 1)) continue;
+    const score = (SICK.has(a.code) ? 2e12 : 0) + (a.row_id != null ? 1e12 : 0) + Number(a.id || 0);
+    if (!best || score > best._s) best = { ...a, _s: score };
+  }
+  return best;
+}
+
+/* Розрахунок місяця.
+   data: { rows, weeks, absences, subs, overrides, calendar, codes, teachers }
+   opt:  { sheet: 'ped' | 'staff', toDay: число — для проміжного табеля }
+   Повертає { days, rows: [{ row, name, position, cells, tot }], totals, issues } */
+function computeMonth(y, m, data, opt = {}) {
+  const sheet = opt.sheet || "ped";
+  const days = monthDays(y, m, data.calendar);
+  const toDay = opt.toDay && opt.toDay < days.length ? opt.toDay : null;
+  const first = days[0].iso, last = days[(toDay || days.length) - 1].iso;
+  const codeGrp = {};
+  for (const c of data.codes || []) codeGrp[c.code] = c.grp;
+  const tName = {};
+  for (const t of data.teachers || []) tName[t.id] = t.full_name;
+  const ovr = {};
+  for (const o of data.overrides || []) ovr[o.row_id + "|" + o.day] = o;
+  const subs = {};
+  for (const s of data.subs || []) {
+    const k = s.row_id + "|" + s.day;
+    subs[k] = (subs[k] || 0) + num(s.hours);
+  }
+  const issues = [];
+  const out = [];
+  const rows = [...(data.rows || [])]
+    .filter(r => (r.sheet || "ped") === sheet)
+    .filter(r => (!r.date_from || r.date_from <= last) && (!r.date_to || r.date_to >= first))
+    .sort((a, b) => (a.sort - b.sort) || (a.id - b.id));
+  const emptyTot = () => ({ days: 0, hours: 0, zam: 0, night: 0, eve: 0, hol: 0, absDays: 0, absHours: 0, g: {} });
+
+  for (const row of rows) {
+    const cells = [];
+    const tot = emptyTot();
+    let anyWeek = false;
+    for (const day of days) {
+      const key = row.id + "|" + day.iso;
+      const week = weekFor(data.weeks || [], row.id, day.iso);
+      if (week) anyWeek = true;
+      const sc = schedFor(week, day);
+      let cell;
+      if (toDay && day.d > toDay) {
+        cell = { c: "", h: null, k: 0, src: "cut" };
+      } else if ((row.date_from && day.iso < row.date_from) || (row.date_to && day.iso > row.date_to)) {
+        cell = { c: "", h: null, k: 0, src: "out" };
+      } else if (ovr[key]) {
+        const o = ovr[key];
+        cell = { c: o.code || "", h: o.hours == null ? null : num(o.hours), k: 0, src: "ovr", note: o.note || "" };
+        if (cell.c === "Р") { cell.k = subs[key] || 0; cell.n = sc.night; cell.e = sc.eve; cell.hol = day.holiday ? num(cell.h) : 0; }
+      } else if (!sc.works) {
+        cell = { c: "X", h: null, k: 0, src: "cal" };
+      } else {
+        const a = absenceFor(data.absences || [], row, day.iso, day.wd);
+        if (a) cell = { c: a.code, h: sc.h || null, k: 0, src: "abs", abs: a };
+        else cell = { c: "Р", h: sc.h || null, k: subs[key] || 0, n: sc.night, e: sc.eve, hol: sc.hol, src: "calc" };
+      }
+      if (subs[key] && cell.c !== "Р" && cell.src !== "cut") {
+        issues.push({ level: "err", text: `${tName[row.teacher_id] || "?"} (${row.position}): заміна ${uaDate(day.iso)}, але в цей день «${cell.c || "порожньо"}».` });
+      }
+      cells.push(cell);
+      const g = cell.c === "X" || cell.c === "" ? null : (codeGrp[cell.c] || (cell.c === "Р" ? "work" : null));
+      if (g === "work") {
+        tot.days++; tot.hours += num(cell.h) + (cell.k || 0); tot.zam += cell.k || 0;
+        tot.night += cell.n || 0; tot.eve += cell.e || 0;
+        tot.hol += cell.c === "РВ" ? num(cell.h) + (cell.k || 0) : (cell.hol || 0);   // РВ — робота у вихідний / святковий день
+      } else if (g) {
+        const t = tot.g[g] ||= [0, 0];
+        t[0]++; t[1] += num(cell.h);
+        tot.absDays++; tot.absHours += num(cell.h);
+      } else if (cell.c && cell.c !== "X") {
+        issues.push({ level: "warn", text: `${tName[row.teacher_id] || "?"}: невідомий код «${cell.c}» ${uaDate(day.iso)} — додайте його в таблицю кодів.` });
+      }
+    }
+    if (!anyWeek) issues.push({ level: "warn", text: `${tName[row.teacher_id] || "?"} (${row.position}): немає графіка годин на цей місяць — у днях «Р» без годин.` });
+    const wEnd = weekFor(data.weeks || [], row.id, last);   // навантаження — тижневі години за графіком на кінець періоду
+    const load = wEnd && wEnd.kind === "week" ? wEnd.hours.reduce((a, x) => a + num(x), 0) : null;
+    const rate = row.rate == null || row.rate === "" ? null : num(row.rate);
+    out.push({ row, name: tName[row.teacher_id] || "?", position: row.position, rate, load, cells, tot });
+  }
+
+  // неявки людей, яких немає в цьому табелі місяця (лише якщо людини немає й в іншому табелі)
+  const inSheet = new Set(out.map(r => r.row.teacher_id));
+  const inAny = new Set((data.rows || []).map(r => r.teacher_id));
+  for (const a of data.absences || []) {
+    if (a.date_to < first || a.date_from > last) continue;
+    if (!inSheet.has(a.teacher_id) && !inAny.has(a.teacher_id))
+      issues.push({ level: "warn", text: `Неявка ${a.code} ${uaDate(a.date_from)}–${uaDate(a.date_to)}: ${tName[a.teacher_id] || "?"} — немає в жодному табелі.` });
+  }
+
+  const totals = emptyTot();
+  for (const r of out) {
+    for (const k of ["days", "hours", "zam", "night", "eve", "hol", "absDays", "absHours"]) totals[k] += r.tot[k];
+    for (const [g, v] of Object.entries(r.tot.g)) { const t = totals.g[g] ||= [0, 0]; t[0] += v[0]; t[1] += v[1]; }
+  }
+  return { y, m, sheet, toDay, days, rows: out, totals, issues };
+}
+
+// Кінцева дата відпустки за кількістю календарних днів.
+// Святкові дні (is_holiday у календарі) до тривалості не входять — відпустка подовжується.
+function vacationEnd(startIso, nDays, holidays) {
+  const hol = new Set(holidays || []);
+  let d = dayNo(startIso), left = nDays;
+  const iso = n => new Date(n * 864e5).toISOString().slice(0, 10);
+  while (true) { if (!hol.has(iso(d))) left--; if (left <= 0) break; d++; }
+  return iso(d);
+}
+// Скільки календарних днів перетинаються два періоди (з урахуванням днів тижня першого)
+function overlapDays(a, b) {
+  const from = a.date_from > b.date_from ? a.date_from : b.date_from;
+  const to = a.date_to < b.date_to ? a.date_to : b.date_to;
+  if (from > to) return 0;
+  return dayNo(to) - dayNo(from) + 1;
+}
+const addDaysIso = (iso, k) => new Date((dayNo(iso) + k) * 864e5).toISOString().slice(0, 10);
+
+// Як показати клітинку: код і рядок годин («n+k»)
+function cellText(cell) {
+  const h = cell.h == null ? "" : fmtH(cell.h);
+  if (cell.k) return { c: cell.c, h: `${h || 0}+${fmtH(cell.k)}` };
+  if (cell.c === "X") return { c: "X", h: "X" };
+  return { c: cell.c, h };
+}
+
+// Знімок для збереження «поданого» табеля і для порівняння
+function makeSnapshot(res, meta) {
+  return {
+    v: 2, month: isoDate(res.y, res.m, 1), sheet: res.sheet, to_day: res.toDay || null, ...meta,
+    rows: res.rows.map(r => ({
+      row_id: r.row.id, teacher_id: r.row.teacher_id, sort: r.row.sort,
+      name: r.name, name_note: r.row.name_note || "", position: r.position, tab_no: r.row.tab_no || "",
+      rate: r.rate, load: r.load,
+      cells: r.cells.map(c => { const t = cellText(c); return [t.c, t.h]; }),
+      tot: r.tot
+    })),
+    totals: res.totals
+  };
+}
+const rowSig = r => JSON.stringify([r.name, r.name_note, r.position, r.cells, r.tot]);
+
+// Що змінилося порівняно з поданим знімком: { changed: [row_id], added: [...], removed: [...] }
+function diffSnapshots(prev, cur) {
+  const P = new Map(prev.rows.map(r => [r.row_id, r]));
+  const C = new Map(cur.rows.map(r => [r.row_id, r]));
+  const changed = [], added = [], removed = [];
+  for (const [id, r] of C) {
+    if (!P.has(id)) added.push(id);
+    else if (rowSig(P.get(id)) !== rowSig(r)) changed.push(id);
+  }
+  for (const id of P.keys()) if (!C.has(id)) removed.push(id);
+  return { changed, added, removed };
+}
+// По яких днях різниця (для підказки)
+function diffDays(prevRow, curRow) {
+  const out = [];
+  curRow.cells.forEach((c, i) => {
+    const p = prevRow.cells[i] || ["", ""];
+    if (p[0] !== c[0] || p[1] !== c[1]) out.push({ d: i + 1, from: p, to: c });
+  });
+  return out;
+}
+
+// Нормалізація ПІБ для порівняння: регістр, пробіли, апострофи
+function normName(s) {
+  return String(s || "").toLowerCase().replace(/[’ʼ`´‘]/g, "'").replace(/\s+/g, " ").trim();
+}
+
+/* Розбір таблиці листків непрацездатності, скопійованої з кабінету ПФУ.
+   Рядок: номер ЛН · дата відкриття · дата закриття · статус · ПІБ.
+   Дублікати з «.1» (другий примірник на сумісництво) зводимо в один. */
+function parsePfu(text) {
+  const out = [], seen = new Map();
+  for (const line of String(text || "").split(/\r?\n/)) {
+    const m = line.match(/(\d{6,}-\d{6,}-\d+)(\.\d+)?\s+(\d{2}\.\d{2}\.\d{4})\s+(\d{2}\.\d{2}\.\d{4})\s+(.+?)\s{1,}([А-ЯІЇЄҐA-Z'’ʼ\- ]{5,})\s*$/u);
+    if (!m) continue;
+    const toIso = s => `${s.slice(6, 10)}-${s.slice(3, 5)}-${s.slice(0, 2)}`;
+    const base = m[1];
+    const rec = { no: base, copy: !!m[2], from: toIso(m[3]), to: toIso(m[4]), status: m[5].trim(), name: m[6].trim() };
+    if (seen.has(base)) { seen.get(base).copies++; continue; }
+    rec.copies = 0;
+    seen.set(base, rec);
+    out.push(rec);
+  }
+  return out.sort((a, b) => a.from.localeCompare(b.from) || a.name.localeCompare(b.name));
+}
+
+if (typeof module !== "undefined") module.exports = { posLabel, fmtRate, monthDays, weekFor, schedFor, absenceFor, computeMonth, cellText, vacationEnd, overlapDays, addDaysIso,
+  makeSnapshot, diffSnapshots, diffDays, normName, parsePfu, isoDate, uaDate, fmtH, MONTHS, GROUPS };
+</script>
+
+<!-- =================================================================
+     ІНТЕРФЕЙС
+     ================================================================= -->
+<script>
+"use strict";
+
+let sb = null;
+const S = {
+  role: null, ym: null, sheet: "ped",   // ym: { y, m }; sheet: ped | staff
+  holidays: [],
+  settings: null, codes: [], teachers: [], rows: [], weeks: [], calendar: [],
+  absences: [], subs: [], overrides: [], sheets: [],
+  res: null, tab: "sheet"
+};
+const canEdit = () => S.role === "deputy";
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const errBox = t => `<div class="msg err">${esc(t)}</div>`;
+function showMsg(id, text, type) { const el = document.getElementById(id); el.textContent = text; el.className = "msg " + (type || ""); }
+function screen(name) {
+  for (const s of ["setup", "login", "app"]) document.getElementById("screen-" + s).style.display = s === name ? "block" : "none";
+}
+const todayIso = () => { const d = new Date(); return isoDate(d.getFullYear(), d.getMonth() + 1, d.getDate()); };
+const monthFirst = () => isoDate(S.ym.y, S.ym.m, 1);
+const monthLast = () => isoDate(S.ym.y, S.ym.m, new Date(Date.UTC(S.ym.y, S.ym.m, 0)).getUTCDate());
+const teacherName = id => S.teachers.find(t => t.id === id)?.full_name || "?";
+const rowLabel = r => `${teacherName(r.teacher_id)}${r.name_note ? " " + r.name_note : ""} — ${r.position}`;
+
+// ---------------- підключення й вхід (спільні з index.html) ----------------
+function loadConfig() { return { url: localStorage.getItem("sb_url") || "", key: localStorage.getItem("sb_key") || "" }; }
+function saveConfig() {
+  const url = document.getElementById("cfg-url").value.trim(), key = document.getElementById("cfg-key").value.trim();
+  if (!url || !key) { showMsg("setup-msg", "Заповніть обидва поля.", "err"); return; }
+  localStorage.setItem("sb_url", url); localStorage.setItem("sb_key", key);
+  init();
+}
+async function init() {
+  const cfg = loadConfig();
+  if (!cfg.url || !cfg.key) { screen("setup"); return; }
+  sb = supabase.createClient(cfg.url, cfg.key);
+  const { data: { session } } = await sb.auth.getSession();
+  if (session) onLoggedIn(session); else screen("login");
+}
+async function doLogin() {
+  const email = document.getElementById("login-email").value.trim(), pass = document.getElementById("login-pass").value;
+  if (!email || !pass) { showMsg("login-msg", "Введіть пошту й пароль.", "err"); return; }
+  showMsg("login-msg", "Входимо…", "");
+  const { data, error } = await sb.auth.signInWithPassword({ email, password: pass });
+  if (error) { showMsg("login-msg", "Не вдалося увійти: " + error.message, "err"); return; }
+  onLoggedIn(data.session);
+}
+async function doLogout() { await sb.auth.signOut(); location.reload(); }
+
+async function onLoggedIn(session) {
+  document.getElementById("who").textContent = session.user.email;
+  screen("app");
+  const { data: roleRow, error } = await sb.from("app_user_role").select("role").eq("user_id", session.user.id).maybeSingle();
+  if (error) { document.getElementById("sheet-area").innerHTML = errBox(error.message); return; }
+  S.role = roleRow?.role || null;
+  if (!S.role) {
+    document.getElementById("sheet-area").innerHTML = errBox("Вашому акаунту не призначено роль. Додайте запис у таблицю app_user_role.");
+    return;
+  }
+  const ok = await loadStatic();
+  if (!ok) return;
+  // місяць: з адреси (#2026-11) або попередній/поточний
+  const fromHash = location.hash.match(/^#(\d{4})-(\d{2})(?:-(staff))?$/);
+  if (fromHash?.[3]) { S.sheet = "staff"; document.getElementById("sel-sheet").value = "staff"; }
+  const d = new Date();
+  const ym = fromHash ? `${fromHash[1]}-${fromHash[2]}` : `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`;
+  document.getElementById("exp-date").value = todayIso();
+  document.getElementById("btn-submit").style.display = canEdit() ? "" : "none";
+  selectMonth(ym);
+}
+
+// Дані, що не залежать від місяця
+async function loadStatic() {
+  const q = await Promise.all([
+    sb.from("ts_settings").select("*").eq("id", 1).maybeSingle(),
+    sb.from("ts_code").select("*").order("sort"),
+    sb.from("teacher").select("id, full_name, is_active").order("full_name"),
+    sb.from("ts_row").select("*").order("sort"),
+    sb.from("ts_row_week").select("*").order("valid_from"),
+    sb.from("ts_calendar").select("day").eq("is_holiday", true)
+  ]);
+  const e = q.find(x => x.error);
+  if (e) {
+    document.getElementById("sheet-area").innerHTML = errBox(/ts_/.test(e.error.message)
+      ? "Таблиці табеля не знайдено. Спершу запустіть tabel_stage1.sql у Supabase (SQL Editor). (" + e.error.message + ")"
+      : e.error.message);
+    return false;
+  }
+  [S.settings, S.codes, S.teachers, S.rows, S.weeks] = q.map(x => x.data);
+  S.holidays = (q[5].data || []).map(x => x.day);
+  S.settings ||= {};
+  return true;
+}
+
+// Дані місяця
+async function loadMonth() {
+  const f = monthFirst(), l = monthLast();
+  const q = await Promise.all([
+    sb.from("ts_absence").select("*").lte("date_from", l).gte("date_to", f).order("date_from"),
+    sb.from("ts_substitution").select("*").gte("day", f).lte("day", l).order("day"),
+    sb.from("ts_override").select("*").gte("day", f).lte("day", l),
+    sb.from("ts_calendar").select("*").gte("day", f).lte("day", l).order("day"),
+    sb.from("ts_sheet").select("*").eq("month", f).eq("sheet", S.sheet).order("created_at")
+  ]);
+  const e = q.find(x => x.error);
+  if (e) { document.getElementById("sheet-area").innerHTML = errBox(e.error.message); return false; }
+  [S.absences, S.subs, S.overrides, S.calendar, S.sheets] = q.map(x => x.data);
+  return true;
+}
+
+function recompute() {
+  S.res = computeMonth(S.ym.y, S.ym.m, S, { sheet: S.sheet });
+  document.getElementById("cnt-abs").textContent = sheetAbs().length || "";
+  document.getElementById("cnt-zam").textContent = sheetSubs().length || "";
+  document.getElementById("cnt-ver").textContent = S.sheets.length || "";
+  renderMonthStatus();
+}
+
+async function selectMonth(ym) {
+  const [y, m] = ym.split("-").map(Number);
+  if (!y || !m) return;
+  S.ym = { y, m };
+  document.getElementById("sel-month").value = `${y}-${pad2(m)}`;
+  history.replaceState(null, "", `#${y}-${pad2(m)}${S.sheet === "staff" ? "-staff" : ""}`);
+  document.getElementById("sheet-area").innerHTML = `<div class="loading" style="padding:16px;">Завантаження…</div>`;
+  if (!await loadMonth()) return;
+  recompute();
+  renderTab();
+}
+function selectSheet(v) { S.sheet = v; selectMonth(`${S.ym.y}-${pad2(S.ym.m)}`); }
+function shiftMonth(k) {
+  let { y, m } = S.ym; m += k;
+  if (m < 1) { m = 12; y--; } if (m > 12) { m = 1; y++; }
+  selectMonth(`${y}-${pad2(m)}`);
+}
+async function reload(staticToo) {
+  if (staticToo) await loadStatic();
+  await loadMonth();
+  recompute();
+  renderTab();
+}
+
+function switchTab(name) {
+  S.tab = name;
+  document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("active", b.dataset.tab === name));
+  document.querySelectorAll(".panel").forEach(p => p.classList.toggle("active", p.id === "tab-" + name));
+  closePop();
+  renderTab();
+}
+function renderTab() {
+  ({ sheet: renderSheet, abs: renderAbsences, zam: renderSubs, pfu: renderPfu, rows: renderRows,
+     ver: renderVersions, cfg: renderSettings, help: renderHelp })[S.tab]();
+}
+
+// Останній поданий знімок місяця і порівняння з поточним станом
+// останній поданий повний табель (проміжний не рахується: з ним коригуючий не порівнюють)
+function lastSheet() { return S.sheets.filter(s => s.kind !== "проміжний").at(-1) || null; }
+function currentSnapshot() { return makeSnapshot(S.res, {}); }
+function currentDiff() {
+  const last = lastSheet();
+  if (!last) return null;
+  return diffSnapshots(last.snapshot, currentSnapshot());
+}
+// неявки й заміни лише працівників поточного табеля
+function sheetRowIds() { return new Set(S.rows.filter(r => (r.sheet || "ped") === S.sheet).map(r => r.id)); }
+function sheetAbs() {
+  const t = new Set(S.rows.filter(r => (r.sheet || "ped") === S.sheet).map(r => r.teacher_id));
+  return S.absences.filter(a => t.has(a.teacher_id));
+}
+function sheetSubs() { const ids = sheetRowIds(); return S.subs.filter(s => ids.has(s.row_id)); }
+function renderMonthStatus() {
+  const el = document.getElementById("month-status");
+  const last = lastSheet();
+  const mid = S.sheets.filter(s => s.kind === "проміжний").at(-1);
+  if (!last) { el.innerHTML = mid ? `<span class="badge info">подано проміжний по ${mid.to_day}-е</span>` : `<span class="badge warn">ще не подано</span>`; return; }
+  const d = currentDiff();
+  const n = d.changed.length + d.added.length + d.removed.length;
+  el.innerHTML = `<span class="badge ok" title="Останній поданий: ${esc(last.kind)} від ${uaDate(last.fill_date)}">подано ${uaDate(last.fill_date)}</span> ` +
+    (n ? `<span class="badge err" title="Після подання змінилися рядки — потрібен коригуючий табель">змінено рядків: ${n}</span>` : `<span class="badge info">без змін</span>`);
+}
+
+// =====================================================================
+//  ВКЛАДКА «ТАБЕЛЬ»: сітка
+// =====================================================================
+function renderSheet() {
+  const res = S.res;
+  const t = res.totals;
+  const tn = t.g.AZ || [0, 0];
+  document.getElementById("stats").innerHTML = `
+    <div class="stat"><b>${res.rows.length}</b><span>рядків</span></div>
+    <div class="stat"><b>${res.days.filter(d => d.work).length}</b><span>робочих днів</span></div>
+    <div class="stat"><b>${t.days} / ${fmtH(t.hours)}</b><span>відпрацьовано: дн / год</span></div>
+    ${S.sheet === "staff" ? `<div class="stat"><b>${fmtH(t.night)} / ${fmtH(t.hol)}</b><span>нічних / святкових, год</span></div>`
+                          : `<div class="stat"><b>${fmtH(t.zam)}</b><span>заміни, год</span></div>`}
+    <div class="stat"><b>${t.absDays} / ${fmtH(t.absHours)}</b><span>неявки: дн / год</span></div>
+    <div class="stat"><b>${tn[0]} / ${fmtH(tn[1])}</b><span>з них ТН: дн / год</span></div>`;
+
+  const iss = res.issues;
+  document.getElementById("issues").innerHTML = iss.length ? `<div class="card" style="padding:10px 16px;">
+      <b style="font-weight:500;">Перевірка: ${iss.filter(i => i.level === "err").length} помилок, ${iss.filter(i => i.level === "warn").length} попереджень</b>
+      ${iss.map(i => `<div class="issue ${i.level}"><b>${i.level === "err" ? "✕" : "!"}</b><span>${esc(i.text)}</span></div>`).join("")}
+    </div>` : "";
+
+  if (!res.rows.length) {
+    document.getElementById("sheet-area").innerHTML = `<p class="hint" style="padding:16px;">У цьому табелі за місяць немає жодного рядка. Додайте працівників у вкладці «Працівники і графік».</p>`;
+    return;
+  }
+  const d = currentDiff();
+  const changedSet = new Set(d ? [...d.changed, ...d.added] : []);
+  let h = `<table class="sheet"><thead><tr><th class="nm">ПІБ, посада</th>`;
+  for (const day of res.days) h += `<th class="${day.work ? "" : "we"}" title="${day.note ? esc(day.note) : ""}">${day.d}<br>${WD_SHORT[day.wd]}</th>`;
+  const staff = S.sheet === "staff";
+  h += `<th class="first" title="Відпрацьовано днів">Дн</th><th title="Відпрацьовано годин (з замінами)">Год</th>` +
+       (staff ? `<th title="З них нічних годин">Ніч</th><th title="З них у святкові дні">Св</th>` : `<th title="Заміни, год">Зам</th>`) +
+       `<th title="Неявки, днів">Неяв</th><th title="ТН, днів">ТН</th></tr></thead><tbody>`;
+  res.rows.forEach((r, i) => {
+    const cls = changedSet.has(r.row.id) ? "changed" : "";
+    h += `<tr class="${cls}"><td class="nm" title="${esc(rowLabel(r.row))}${cls ? " — змінено після подання" : ""}"><b>${i + 1}. ${esc(r.name)}${r.row.name_note ? " " + esc(r.row.name_note) : ""}</b><span>${esc(posLabel(r.position, r.rate, r.load, "both"))}</span></td>`;
+    r.cells.forEach((c, k) => {
+      const t = cellText(c);
+      const cl = ["d", c.src === "out" ? "out" : "", c.c === "X" ? "x" : "", c.c === "ТН" ? "tn" : "",
+                  c.src === "abs" && c.c !== "ТН" ? "abs" : "", c.src === "ovr" ? "ovr" : "", c.k ? "zam" : ""].filter(Boolean).join(" ");
+      h += `<td class="${cl}" onclick="openCell(event, ${r.row.id}, ${k})"><span class="c">${esc(t.c) || "&nbsp;"}</span><span class="h">${t.c === "X" ? "&nbsp;" : esc(t.h) || "&nbsp;"}</span></td>`;
+    });
+    const tnr = r.tot.g.AZ || [0, 0];
+    h += `<td class="sum first">${r.tot.days}</td><td class="sum">${fmtH(r.tot.hours)}</td>` +
+         (staff ? `<td class="sum">${r.tot.night ? fmtH(r.tot.night) : ""}</td><td class="sum">${r.tot.hol ? fmtH(r.tot.hol) : ""}</td>`
+                : `<td class="sum">${r.tot.zam ? fmtH(r.tot.zam) : ""}</td>`) +
+         `<td class="sum">${r.tot.absDays || ""}</td><td class="sum">${tnr[0] || ""}</td></tr>`;
+  });
+  h += `</tbody><tfoot><tr><td class="nm">РАЗОМ</td>${res.days.map(() => "<td></td>").join("")}
+        <td class="sum first">${t.days}</td><td class="sum">${fmtH(t.hours)}</td>` +
+        (staff ? `<td class="sum">${fmtH(t.night)}</td><td class="sum">${fmtH(t.hol)}</td>` : `<td class="sum">${fmtH(t.zam)}</td>`) +
+        `<td class="sum">${t.absDays}</td><td class="sum">${tn[0]}</td></tr></tfoot></table>`;
+  document.getElementById("sheet-area").innerHTML = h;
+}
+
+// ---------- редагування клітинки ----------
+const SRC_TEXT = { calc: "за розкладом", cal: "вихідний за календарем", abs: "неявка", ovr: "ручна правка", out: "поза періодом роботи" };
+function openCell(ev, rowId, k) {
+  const r = S.res.rows.find(x => x.row.id === rowId);
+  const cell = r.cells[k], day = S.res.days[k];
+  if (cell.src === "out" || cell.src === "cut") return;
+  const pop = document.getElementById("pop");
+  const codes = [["Р", "Р — робочий"], ["X", "X — вихідний"], ["", "порожньо"],
+                 ...S.codes.filter(c => c.code !== "Р").map(c => [c.code, `${c.code} — ${c.name}`])];
+  let src = SRC_TEXT[cell.src];
+  if (cell.src === "abs") src += `: ${cell.abs.code} ${uaDate(cell.abs.date_from)}–${uaDate(cell.abs.date_to)}${cell.abs.doc_no ? ", № " + cell.abs.doc_no : ""}`;
+  if (cell.k) src += `; заміни +${fmtH(cell.k)} год`;
+  const ed = canEdit();
+  pop.innerHTML = `
+    <h4>${esc(r.name)}, ${uaDate(day.iso)} (${WD_SHORT[day.wd]})${day.holiday ? " · святковий" : ""}</h4>
+    <div class="src">${esc(r.position)}<br>Зараз: <b>${esc(cell.c || "порожньо")}${cell.h != null ? " · " + fmtH(cell.h) + " год" : ""}</b> — ${esc(src)}</div>
+    ${ed ? `<div class="row2">
+      <div><label style="margin-top:0;">Код</label><select id="pop-code">${codes.map(([v, t]) => `<option value="${esc(v)}" ${v === cell.c ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></div>
+      <div><label style="margin-top:0;">Годин</label><input id="pop-h" value="${cell.h != null ? fmtH(cell.h) : ""}" inputmode="decimal"></div>
+    </div>
+    <label>Примітка</label><input id="pop-note" value="${esc(cell.note || "")}">
+    <div class="acts">
+      <button class="primary" onclick="saveCell(${rowId}, '${day.iso}')">Зберегти правку</button>
+      ${cell.src === "ovr" ? `<button class="btn" onclick="clearCell(${rowId}, '${day.iso}')">Повернути розрахунок</button>` : ""}
+      <button class="btn" onclick="closePop()">Закрити</button>
+    </div>
+    <p class="hint">Лікарняні й відпустки краще вносити періодом у вкладці «Неявки», заміни — у «Заміни». Правка клітинки — для винятків.</p>`
+    : `<div class="acts"><button class="btn" onclick="closePop()">Закрити</button></div>`}`;
+  pop.style.display = "block";
+  const x = Math.min(ev.clientX + 8, window.innerWidth - 310), y = Math.min(ev.clientY + 8, window.innerHeight - pop.offsetHeight - 10);
+  pop.style.left = x + "px"; pop.style.top = Math.max(10, y) + "px";
+}
+function closePop() { document.getElementById("pop").style.display = "none"; }
+document.addEventListener("keydown", e => { if (e.key === "Escape") closePop(); });
+
+function parseHours(raw) {
+  const s = String(raw ?? "").trim().replace(",", ".");
+  if (s === "") return null;
+  const x = Number(s);
+  return isNaN(x) || x < 0 ? undefined : x;
+}
+async function saveCell(rowId, iso) {
+  const code = document.getElementById("pop-code").value;
+  const h = parseHours(document.getElementById("pop-h").value);
+  if (h === undefined) { alert("Години — число."); return; }
+  const note = document.getElementById("pop-note").value.trim() || null;
+  const { error } = await sb.from("ts_override").upsert({ row_id: rowId, day: iso, code: code || null, hours: code === "X" ? null : h, note },
+    { onConflict: "row_id,day" }).select();
+  if (error) { alert("Не збережено: " + error.message); return; }
+  closePop(); await reload();
+}
+async function clearCell(rowId, iso) {
+  const { error } = await sb.from("ts_override").delete().match({ row_id: rowId, day: iso });
+  if (error) { alert(error.message); return; }
+  closePop(); await reload();
+}
+
+// =====================================================================
+//  ВКЛАДКА «НЕЯВКИ»
+// =====================================================================
+function teacherOptions(sel) {
+  const ids = [...new Set(S.rows.filter(r => (r.sheet || "ped") === S.sheet).map(r => r.teacher_id))];
+  return ids.map(id => ({ id, n: teacherName(id) })).sort((a, b) => a.n.localeCompare(b.n, "uk"))
+    .map(t => `<option value="${t.id}" ${t.id === sel ? "selected" : ""}>${esc(t.n)}</option>`).join("");
+}
+function rowOptionsFor(teacherId, sel) {
+  return `<option value="">усі посади працівника</option>` + S.rows.filter(r => r.teacher_id === teacherId)
+    .map(r => `<option value="${r.id}" ${r.id === sel ? "selected" : ""}>${esc(r.position)}${r.name_note ? " " + esc(r.name_note) : ""}</option>`).join("");
+}
+function codeOptions(sel, withWork) {
+  return S.codes.filter(c => withWork || c.grp !== "work")
+    .map(c => `<option value="${esc(c.code)}" ${c.code === sel ? "selected" : ""}>${esc(c.code)} — ${esc(c.name)}</option>`).join("");
+}
+const VAC_CODES = new Set(["В", "Д", "Ч", "ТВ", "Н", "ДО"]);     // відпустки, що продовжуються на дні лікарняного
+function vacationSick() {
+  // відпустки цього місяця, перервані лікарняним того ж працівника
+  const out = [];
+  for (const v of S.absences.filter(a => VAC_CODES.has(a.code))) {
+    const n = S.absences.filter(t => SICK.has(t.code) && t.teacher_id === v.teacher_id)
+      .reduce((acc, t) => acc + overlapDays(v, t), 0);
+    const done = (String(v.note || "").match(/\[\+(\d+) ЛН\]/) || [])[1];
+    if (n && Number(done || 0) !== n) out.push({ v, n, done: Number(done || 0) });
+  }
+  return out;
+}
+function renderAbsences() {
+  const area = document.getElementById("abs-area");
+  const ed = canEdit();
+  const sheetRows = S.rows.filter(r => (r.sheet || "ped") === S.sheet);
+  const firstT = sheetRows.length ? [...sheetRows].sort((a, b) => teacherName(a.teacher_id).localeCompare(teacherName(b.teacher_id), "uk"))[0].teacher_id : null;
+  let h = `<h2>Неявки за ${MONTHS[S.ym.m - 1].toLowerCase()} ${S.ym.y}</h2>
+    <p class="hint">Вносьте періодом «з … по …»: код ставиться на всі робочі дні періоду за графіком, у вихідні лишається X.
+      Лікарняний — на «усі посади працівника»; він завжди переважає відпустку.
+      Можна обмежити днями тижня (напр., навчальна відпустка щочетверга).</p>`;
+  const vs = vacationSick();
+  if (vs.length) h += vs.map(({ v, n, done }) => `<div class="msg warn">Відпустку ${esc(v.code)} ${esc(teacherName(v.teacher_id))}
+      (${uaDate(v.date_from)}–${uaDate(v.date_to)}) перервано лікарняним на ${n} дн.${done ? ` (уже продовжено на ${done})` : ""}.
+      ${ed ? `<button class="btn" style="margin-left:6px;" onclick="extendVacation(${v.id}, ${n - done}, ${n})">Продовжити на ${n - done} дн.</button>` : ""}</div>`).join("");
+  if (ed) h += `<div class="card" style="background:#fafbfd;margin-top:12px;">
+      <div class="grid2">
+        <div><label>Працівник</label><select id="ab-t" onchange="document.getElementById('ab-r').innerHTML=rowOptionsFor(+this.value)">${teacherOptions(firstT)}</select></div>
+        <div><label>Посада</label><select id="ab-r">${rowOptionsFor(firstT)}</select></div>
+        <div><label>Код</label><select id="ab-c">${codeOptions("ТН")}</select></div>
+        <div><label>З</label><input type="date" id="ab-f" value="${monthFirst()}" onchange="absDur()"></div>
+        <div><label>Тривалість, календарних днів</label><input id="ab-n" type="number" min="1" placeholder="напр. 24" oninput="absDur()"></div>
+        <div><label>По (включно)</label><input type="date" id="ab-to" value="${monthFirst()}"></div>
+        <div><label>№ документа (ЛН, наказ, заява)</label><input id="ab-doc"></div>
+        <div><label>Примітка</label><input id="ab-note"></div>
+      </div>
+      <label>Лише в дні тижня (не позначено — усі дні)</label>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;">${WD7.map((d, i) => `<label style="margin:0;display:flex;gap:4px;align-items:center;font-size:13px;color:var(--ink);">
+        <input type="checkbox" class="ab-wd" value="${i + 1}" style="width:auto"> ${d}</label>`).join("")}</div>
+      <p class="hint">Тривалість рахує дату «по»: святкові дні (позначені в календарі) до щорічної відпустки не входять.</p>
+      <button class="primary" style="margin-top:12px;" onclick="addAbsence()">+ Додати неявку</button>
+      <div id="ab-msg" class="msg"></div>
+    </div>`;
+  const list = sheetAbs();
+  if (!list.length) h += `<p class="hint">У цьому місяці неявок немає.</p>`;
+  else {
+    h += `<table class="t" style="margin-top:8px;"><thead><tr><th>Працівник</th><th>Посада</th><th>Код</th><th>З</th><th>По</th><th>Дні тижня</th><th>Документ</th><th>Примітка</th><th></th></tr></thead><tbody>`;
+    for (const a of list) {
+      const row = a.row_id ? S.rows.find(r => r.id === a.row_id) : null;
+      h += `<tr><td>${esc(teacherName(a.teacher_id))}</td><td>${row ? esc(row.position) : "<span class='hint'>усі</span>"}</td>
+        <td><b>${esc(a.code)}</b></td>
+        <td>${ed ? `<input type="date" value="${a.date_from}" onchange="saveAbs(${a.id}, 'date_from', this.value)">` : uaDate(a.date_from)}</td>
+        <td>${ed ? `<input type="date" value="${a.date_to}" onchange="saveAbs(${a.id}, 'date_to', this.value)">` : uaDate(a.date_to)}</td>
+        <td>${a.weekdays?.length ? a.weekdays.map(i => WD7[i - 1]).join(", ") : "<span class='hint'>усі</span>"}</td>
+        <td>${ed ? `<input value="${esc(a.doc_no || "")}" onchange="saveAbs(${a.id}, 'doc_no', this.value)">` : esc(a.doc_no || "")}</td>
+        <td>${ed ? `<input value="${esc(a.note || "")}" onchange="saveAbs(${a.id}, 'note', this.value)">` : esc(a.note || "")}</td>
+        <td>${ed ? `<button class="x-btn" title="Видалити" onclick="delAbs(${a.id})">×</button>` : ""}</td></tr>`;
+    }
+    h += `</tbody></table>`;
+  }
+  area.innerHTML = h;
+}
+function absDur() {
+  const n = parseInt(document.getElementById("ab-n").value, 10), f = document.getElementById("ab-f").value;
+  if (!n || !f) return;
+  const code = document.getElementById("ab-c").value;
+  document.getElementById("ab-to").value = VAC_CODES.has(code) ? vacationEnd(f, n, S.holidays) : addDaysIso(f, n - 1);
+}
+async function extendVacation(id, k, total) {
+  const v = S.absences.find(a => a.id === id);
+  const newTo = vacationEnd(addDaysIso(v.date_to, 1), k, S.holidays);
+  if (!confirm(`Продовжити відпустку ${teacherName(v.teacher_id)} на ${k} дн.: нова дата закінчення ${uaDate(newTo)}?\n\nПеренесення частини відпустки на інший час оформлюється наказом — тоді змініть дати вручну.`)) return;
+  const note = (String(v.note || "").replace(/\s*\[\+\d+ ЛН\]/, "") + ` [+${total} ЛН]`).trim();
+  const { error } = await sb.from("ts_absence").update({ date_to: newTo, note }).eq("id", id).select();
+  if (error) { alert(error.message); return; }
+  await reload();
+}
+async function addAbsence() {
+  const v = id => document.getElementById(id).value;
+  const wds = [...document.querySelectorAll(".ab-wd:checked")].map(x => +x.value);
+  const row = { teacher_id: +v("ab-t"), row_id: v("ab-r") ? +v("ab-r") : null, code: v("ab-c"),
+                date_from: v("ab-f"), date_to: v("ab-to"), doc_no: v("ab-doc").trim() || null, note: v("ab-note").trim() || null,
+                weekdays: wds.length && wds.length < 7 ? wds : null };
+  if (!row.date_from || !row.date_to || row.date_to < row.date_from) { showMsg("ab-msg", "Перевірте дати: «по» не може бути раніше за «з».", "err"); return; }
+  const { error } = await sb.from("ts_absence").insert(row).select();
+  if (error) { showMsg("ab-msg", error.message, "err"); return; }
+  await reload();
+}
+async function saveAbs(id, field, value) {
+  const patch = { [field]: value === "" ? null : value };
+  const a = S.absences.find(x => x.id === id);
+  const nf = field === "date_from" ? value : a.date_from, nt = field === "date_to" ? value : a.date_to;
+  if (!nf || !nt || nt < nf) { alert("«По» не може бути раніше за «з»."); renderAbsences(); return; }
+  const { error } = await sb.from("ts_absence").update(patch).eq("id", id).select();
+  if (error) { alert(error.message); return; }
+  await reload();
+}
+async function delAbs(id) {
+  if (!confirm("Видалити цю неявку?")) return;
+  const { error } = await sb.from("ts_absence").delete().eq("id", id);
+  if (error) { alert(error.message); return; }
+  await reload();
+}
+
+// =====================================================================
+//  ВКЛАДКА «ЗАМІНИ»
+// =====================================================================
+function allRowOptions(sel) {
+  return S.res.rows.map(r => `<option value="${r.row.id}" ${r.row.id === sel ? "selected" : ""}>${esc(rowLabel(r.row))}</option>`).join("");
+}
+function renderSubs() {
+  const area = document.getElementById("zam-area");
+  const ed = canEdit();
+  const subs = sheetSubs();
+  const byRow = {};
+  for (const s of subs) byRow[s.row_id] = (byRow[s.row_id] || 0) + Number(s.hours);
+  let h = `<h2>Заміни за ${MONTHS[S.ym.m - 1].toLowerCase()} ${S.ym.y}</h2>
+    <p class="hint">Години заміни додаються до години дня («n+k») і окремо йдуть у колонку «заміни». Вносьте за наказом про заміщення.</p>`;
+  if (ed) h += `<div class="card" style="background:#fafbfd;margin-top:12px;">
+      <div class="grid2">
+        <div style="grid-column: span 2;"><label>Хто заміняв (рядок табеля)</label><select id="zm-r">${allRowOptions()}</select></div>
+        <div><label>Дата</label><input type="date" id="zm-d" value="${monthFirst()}"></div>
+        <div><label>Годин</label><input id="zm-h" value="1" inputmode="decimal"></div>
+        <div><label>Наказ</label><input id="zm-o" placeholder="139-к/тр від 20.11.2026" value="${esc(S.subs.at(-1)?.order_ref || "")}"></div>
+      </div>
+      <button class="primary" style="margin-top:12px;" onclick="addSub()">+ Додати заміну</button>
+      <div id="zm-msg" class="msg"></div>
+    </div>`;
+  if (!subs.length) h += `<p class="hint">Замін у цьому місяці немає.</p>`;
+  else {
+    h += `<div class="stat-row">${Object.entries(byRow).map(([rid, hrs]) => {
+      const r = S.rows.find(x => x.id === +rid);
+      return `<div class="stat"><b>${fmtH(hrs)}</b><span>${esc(r ? teacherName(r.teacher_id) : "?")}</span></div>`; }).join("")}</div>`;
+    h += `<table class="t"><thead><tr><th>Дата</th><th>Хто</th><th>Годин</th><th>Наказ</th><th>Примітка</th><th></th></tr></thead><tbody>`;
+    for (const s of subs) {
+      const r = S.rows.find(x => x.id === s.row_id);
+      h += `<tr><td>${uaDate(s.day)}</td><td>${esc(r ? rowLabel(r) : "?")}</td><td>${fmtH(s.hours)}</td>
+        <td>${ed ? `<input value="${esc(s.order_ref || "")}" onchange="saveSub(${s.id}, 'order_ref', this.value)">` : esc(s.order_ref || "")}</td>
+        <td>${ed ? `<input value="${esc(s.note || "")}" onchange="saveSub(${s.id}, 'note', this.value)">` : esc(s.note || "")}</td>
+        <td>${ed ? `<button class="x-btn" onclick="delSub(${s.id})">×</button>` : ""}</td></tr>`;
+    }
+    h += `</tbody></table>`;
+  }
+  area.innerHTML = h;
+}
+async function addSub() {
+  const v = id => document.getElementById(id).value;
+  const hrs = parseHours(v("zm-h"));
+  if (!hrs) { showMsg("zm-msg", "Вкажіть кількість годин.", "err"); return; }
+  const row = { row_id: +v("zm-r"), day: v("zm-d"), hours: hrs, order_ref: v("zm-o").trim() || null };
+  if (row.day < monthFirst() || row.day > monthLast()) { showMsg("zm-msg", "Дата має бути в обраному місяці.", "err"); return; }
+  const r = S.res.rows.find(x => x.row.id === row.row_id);
+  const c = r?.cells[Number(row.day.slice(8)) - 1];
+  if (c && c.c !== "Р" && !confirm(`У цей день у табелі «${c.c || "порожньо"}», а не «Р». Все одно додати?`)) return;
+  const { error } = await sb.from("ts_substitution").insert(row).select();
+  if (error) { showMsg("zm-msg", error.message, "err"); return; }
+  await reload();
+}
+async function saveSub(id, field, value) {
+  const { error } = await sb.from("ts_substitution").update({ [field]: value.trim() || null }).eq("id", id).select();
+  if (error) alert(error.message);
+}
+async function delSub(id) {
+  if (!confirm("Видалити цю заміну?")) return;
+  const { error } = await sb.from("ts_substitution").delete().eq("id", id);
+  if (error) { alert(error.message); return; }
+  await reload();
+}
+
+// =====================================================================
+//  ВКЛАДКА «ЛН з ПФУ»: звірка листків непрацездатності
+// =====================================================================
+let pfuText = "";
+function renderPfu() {
+  const area = document.getElementById("pfu-area");
+  area.innerHTML = `<h2>Звірка з листками непрацездатності ПФУ</h2>
+    <p class="hint">Скопіюйте таблицю «Листки непрацездатності» з кабінету страхувальника ПФУ (разом із заголовком чи без)
+      і вставте сюди. Застосунок знайде працівників, покаже, чи кожен ЛН уже є в табелі, і дасть додати відсутні.
+      Дублікати з «.1» (другий примірник для сумісництва) зводяться в один.</p>
+    <textarea id="pfu-text" placeholder="24453254-2044966645-1	19.11.2026	20.11.2026	Закритий	ПЕТРАНЮК УЛЯНА ВАСИЛІВНА">${esc(pfuText)}</textarea>
+    <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
+      <button class="primary" onclick="checkPfu()">Перевірити</button>
+      <label style="display:flex;gap:6px;align-items:center;margin:0;"><input type="checkbox" id="pfu-month" checked style="width:auto;"> лише ЛН, що зачіпають ${MONTHS[S.ym.m - 1].toLowerCase()}</label>
+    </div>
+    <div id="pfu-res"></div>`;
+  if (pfuText) checkPfu();
+}
+// Чи покриває табель період ЛН: усі робочі дні періоду мають ТН (у межах завантажених неявок)
+function pfuStatus(ln, teacherId) {
+  const covering = S.pfuAbs.filter(a => a.teacher_id === teacherId && a.code === "ТН" && a.date_from <= ln.to && a.date_to >= ln.from);
+  if (covering.some(a => a.doc_no && a.doc_no.replace(/\.\d+$/, "") === ln.no)) {
+    const a = covering.find(a => a.doc_no && a.doc_no.replace(/\.\d+$/, "") === ln.no);
+    return a.date_from === ln.from && a.date_to === ln.to ? "ok" : "dates";
+  }
+  // покрито іншим записом (наприклад, одним періодом на кілька ЛН)
+  let d = new Date(ln.from + "T00:00:00Z");
+  const end = new Date(ln.to + "T00:00:00Z");
+  while (d <= end) {
+    const iso = d.toISOString().slice(0, 10);
+    if (!covering.some(a => a.date_from <= iso && a.date_to >= iso)) return "missing";
+    d.setUTCDate(d.getUTCDate() + 1);
+  }
+  return "covered";
+}
+async function checkPfu() {
+  pfuText = document.getElementById("pfu-text").value;
+  const list = parsePfu(pfuText);
+  const box = document.getElementById("pfu-res");
+  if (!list.length) { box.innerHTML = `<div class="msg warn">Не знайдено жодного рядка ЛН. Перевірте, що вставлено таблицю з номерами, датами й ПІБ.</div>`; return; }
+  const onlyMonth = document.getElementById("pfu-month").checked;
+  const f = monthFirst(), l = monthLast();
+  const shown = onlyMonth ? list.filter(x => x.from <= l && x.to >= f) : list;
+  // неявки ТН на весь діапазон ЛН (можуть виходити за межі місяця)
+  const minD = shown.reduce((a, x) => x.from < a ? x.from : a, "9999"), maxD = shown.reduce((a, x) => x.to > a ? x.to : a, "0000");
+  const { data, error } = await sb.from("ts_absence").select("*").eq("code", "ТН").lte("date_from", maxD).gte("date_to", minD);
+  if (error) { box.innerHTML = errBox(error.message); return; }
+  S.pfuAbs = data;
+  const byName = new Map(S.teachers.map(t => [normName(t.full_name), t]));
+  const inRows = new Set(S.rows.map(r => r.teacher_id));
+  const ST = { ok: ["ok", "✓ є в табелі"], covered: ["ok", "✓ покрито"], dates: ["warn", "інші дати в табелі"],
+               missing: ["err", "немає в табелі"], nostaff: ["info", "немає в табелях"] };
+  S.pfuMissing = [];
+  let h = `<table class="t" style="margin-top:12px;"><thead><tr><th>№ ЛН</th><th>Період</th><th>Статус ПФУ</th><th>ПІБ</th><th>У табелі</th><th></th></tr></thead><tbody>`;
+  for (const ln of shown) {
+    const t = byName.get(normName(ln.name));
+    const st = !t || !inRows.has(t.id) ? "nostaff" : pfuStatus(ln, t.id);
+    if (st === "missing") S.pfuMissing.push({ ln, t });
+    const [cls, txt] = ST[st];
+    h += `<tr><td style="font-family:monospace;font-size:12px;">${esc(ln.no)}${ln.copies ? ` <span class="hint">+.1</span>` : ""}</td>
+      <td>${uaDate(ln.from)} – ${uaDate(ln.to)}</td><td>${esc(ln.status)}</td>
+      <td>${esc(t ? t.full_name : ln.name)}</td><td><span class="badge ${cls}">${txt}</span></td>
+      <td>${st === "missing" && canEdit() ? `<button class="btn" onclick="addPfu('${ln.no}')">+ ТН</button>` : ""}</td></tr>`;
+  }
+  h += `</tbody></table>`;
+  const nMiss = S.pfuMissing.length;
+  h = (nMiss ? `<div class="msg err">Не внесено в табель: ${nMiss} ЛН. ${canEdit() ? `<button class="btn" style="margin-left:8px;" onclick="addPfu()">Додати всі відсутні як ТН</button>` : ""}</div>`
+             : `<div class="msg ok">Усі ЛН працівників, які є в табелях, відображено.</div>`) + h;
+  const dates = shown.filter(ln => { const t = byName.get(normName(ln.name)); return t && inRows.has(t.id) && pfuStatus(ln, t.id) === "dates"; }).length;
+  if (dates) h = `<div class="msg warn">У ${dates} ЛН дати в табелі не збігаються з ПФУ — перевірте у вкладці «Неявки».</div>` + h;
+  box.innerHTML = h;
+}
+async function addPfu(no) {
+  const list = (S.pfuMissing || []).filter(x => !no || x.ln.no === no);
+  if (!list.length) return;
+  const rows = list.map(({ ln, t }) => ({ teacher_id: t.id, row_id: null, code: "ТН", date_from: ln.from, date_to: ln.to, doc_no: ln.no, note: "з ПФУ: " + ln.status }));
+  const { error } = await sb.from("ts_absence").insert(rows).select();
+  if (error) { alert(error.message); return; }
+  await reload();
+}
+
+// =====================================================================
+//  ВКЛАДКА «ПРАЦІВНИКИ І РОЗКЛАД»
+// =====================================================================
+const WD7 = ["пн", "вт", "ср", "чт", "пт", "сб", "нд"];
+const listToArr = t => String(t || "").split(/[,;\/\s]+/).filter(Boolean).map(x => Number(x.replace(",", ".")));
+const arrToList = a => (a || []).map(fmtH).join(" / ");
+function schedCell(r, w) {
+  const ed = canEdit() ? "" : "disabled";
+  if (!w) return `<span class="badge warn">немає графіка</span> ${canEdit() ? `<button class="btn" onclick="newWeek(${r.id}, 'week')">+ тиждень</button> <button class="btn" onclick="newWeek(${r.id}, 'cycle')">+ цикл</button>` : ""}`;
+  if (w.kind === "cycle") {
+    return `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+      <span class="badge info">цикл ${w.hours.length} дн.</span>
+      <span class="hint">з</span><input type="date" style="width:140px" value="${w.cycle_start}" ${ed} onchange="saveWeekPatch(${w.id}, { cycle_start: this.value })">
+      <span class="hint">годин:</span><input style="width:150px" value="${esc(arrToList(w.hours))}" title="Години по днях циклу через «/», напр. 24 / 0 / 0 / 0" ${ed} onchange="saveCycle(${w.id}, 'hours', this)">
+      <span class="hint">з них нічних:</span><input style="width:130px" value="${esc(arrToList(w.night))}" placeholder="8 / 0 / 0 / 0" ${ed} onchange="saveCycle(${w.id}, 'night', this)">
+    </div>`;
+  }
+  const sum = w.hours.reduce((a, x) => a + num(x), 0);
+  return `<div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;">
+    ${w.hours.map((x, i) => `<label style="margin:0;text-align:center;font-size:11px;${i > 4 ? "color:#a0a8b4" : ""}">${WD7[i]}<br>
+      <input class="h" style="width:44px" value="${fmtH(x)}" ${ed} onchange="saveWeekDay(${w.id}, ${i}, this)"></label>`).join("")}
+    <span class="hint" style="margin-left:6px;">${fmtH(sum)} год/тиж</span>
+    <label style="margin:0 0 0 8px;font-size:12px;display:flex;gap:4px;align-items:center;" title="Що означає 0 годин у будній день">
+      <input type="checkbox" style="width:auto" ${w.zero_off ? "checked" : ""} ${ed} onchange="saveWeekPatch(${w.id}, { zero_off: this.checked })"> 0 = вихідний (X)</label>
+  </div>`;
+}
+function renderRows() {
+  const area = document.getElementById("rows-area");
+  const ed = canEdit() ? "" : "disabled";
+  const f = monthFirst(), l = monthLast();
+  const staff = S.sheet === "staff";
+  let h = `<h2>Працівники і графік — ${staff ? "обслуговуючий персонал" : "педагогічні працівники"}</h2>
+    <p class="hint">Рядок табеля — одна посада працівника. Графік: <b>тиждень</b> — години на кожен день (пн–нд) або
+      <b>цикл</b> — змінний графік, що повторюється від дати (напр., «доба через три»: 24 / 0 / 0 / 0, нічних 8 / 0 / 0 / 0).
+      Для вчителів 0 у будній день — «Р» без годин; для персоналу з позначкою «0 = вихідний» — X.
+      Графік діє з дати «чинний з» до наступної редакції. Показано графік на ${MONTHS[S.ym.m - 1].toLowerCase()} ${S.ym.y}.</p>
+    <div style="overflow-x:auto;"><table class="t"><thead><tr>
+      <th>Пор.</th><th>Таб. №</th><th>Працівник</th><th>Позн.</th><th>Посада (як у табелі)</th><th title="Ставка: 1; 0,5; 0,25…">Ставка</th><th>З</th><th>По</th>
+      <th>Графік чинний з</th><th>Графік</th><th></th></tr></thead><tbody>`;
+  const rows = S.rows.filter(r => (r.sheet || "ped") === S.sheet).sort((a, b) => a.sort - b.sort || a.id - b.id);
+  for (const r of rows) {
+    const inMonth = (!r.date_from || r.date_from <= l) && (!r.date_to || r.date_to >= f);
+    const w = weekFor(S.weeks, r.id, l) || null;
+    h += `<tr style="${inMonth ? "" : "opacity:.5"}">
+      <td><input class="h" style="width:52px" value="${r.sort}" ${ed} onchange="saveRowField(${r.id}, 'sort', this.value, 'int')"></td>
+      <td><input style="width:64px" value="${esc(r.tab_no || "")}" ${ed} onchange="saveRowField(${r.id}, 'tab_no', this.value)"></td>
+      <td style="min-width:190px;">${esc(teacherName(r.teacher_id))}</td>
+      <td><input style="width:62px" value="${esc(r.name_note || "")}" ${ed} onchange="saveRowField(${r.id}, 'name_note', this.value)"></td>
+      <td style="min-width:220px;"><input value="${esc(r.position)}" ${ed} onchange="saveRowField(${r.id}, 'position', this.value, 'req')"></td>
+      <td><input class="h" style="width:52px" value="${r.rate == null ? "" : fmtRate(r.rate)}" ${ed} onchange="saveRowField(${r.id}, 'rate', this.value, 'rate')"></td>
+      <td><input type="date" value="${r.date_from || ""}" ${ed} onchange="saveRowField(${r.id}, 'date_from', this.value)"></td>
+      <td><input type="date" value="${r.date_to || ""}" ${ed} onchange="saveRowField(${r.id}, 'date_to', this.value)"></td>
+      <td style="white-space:nowrap;">${w ? uaDate(w.valid_from) : ""}</td>
+      <td style="min-width:430px;">${schedCell(r, w)}</td>
+      <td style="white-space:nowrap;">${canEdit() ? `${w ? `<button class="btn" title="Нова редакція графіка з дати (напр., з 2 семестру)" onclick="newWeek(${r.id}, '${w.kind}')">+ з дати</button>` : ""}
+          <button class="btn" title="${S.sheet === "ped" ? "Перенести в табель обслуговуючого персоналу" : "Перенести в табель педпрацівників"}" onclick="saveRowField(${r.id}, 'sheet', '${S.sheet === "ped" ? "staff" : "ped"}')">⇄</button>
+          <button class="x-btn" title="Видалити рядок" onclick="delRow(${r.id})">×</button>` : ""}</td></tr>`;
+  }
+  if (!rows.length) h += `<tr><td colspan="11" class="hint">У цьому табелі ще немає рядків.</td></tr>`;
+  h += `</tbody></table></div>`;
+  if (canEdit()) {
+    const teachers = [...S.teachers].sort((a, b) => a.full_name.localeCompare(b.full_name, "uk"));
+    h += `<h3>Новий рядок</h3><div class="grid2">
+      <div><label>Працівник з реєстру</label><select id="nr-t">${teachers.map(t => `<option value="${t.id}">${esc(t.full_name)}</option>`).join("")}</select></div>
+      <div><label>або новий (ПІБ)</label><input id="nr-new" placeholder="Прізвище Ім'я По батькові"></div>
+      <div><label>Посада (як у табелі)</label><input id="nr-p" placeholder="${staff ? "сторож" : "вчитель МАО"}"></div>
+      <div><label>Позначка</label><input id="nr-n" placeholder="(0.5)"></div>
+      <div><label>Табельний №</label><input id="nr-tab"></div>
+      <div><label>Ставка</label><input id="nr-r" placeholder="1"></div>
+      <div><label>З (прийом)</label><input type="date" id="nr-f" value="${monthFirst()}"></div>
+      <div><label>Графік</label><select id="nr-k"><option value="week">тиждень</option><option value="cycle">цикл (змінний)</option></select></div>
+      <div><label>Порядок</label><input id="nr-s" value="${Math.max(0, ...rows.map(r => r.sort)) + 10}"></div>
+    </div>
+    <button class="primary" style="margin-top:12px;" onclick="addRow()">+ Додати рядок</button>
+    <div id="nr-msg" class="msg"></div>
+    <p class="hint">Працівника з реєстру можна мати в обох табелях (напр., учитель і за сумісництвом — лаборант).</p>`;
+  }
+  area.innerHTML = h;
+}
+function parseRate(t) { const x = Number(String(t).replace(",", ".")); return isFinite(x) && x > 0 && x <= 3 ? x : null; }
+async function saveRowField(id, field, value, kind) {
+  let v = String(value).trim();
+  if (kind === "int") { v = parseInt(v, 10); if (isNaN(v)) { alert("Ціле число."); return; } }
+  else if (kind === "rate" && v !== "") { v = parseRate(v); if (v === null) { alert("Ставка — число від 0,01 до 3 (напр., 1; 0,5; 0,25)."); renderRows(); return; } }
+  else if (kind === "req" && !v) { alert("Поле не може бути порожнім."); renderRows(); return; }
+  else if (v === "") v = null;
+  const { error } = await sb.from("ts_row").update({ [field]: v }).eq("id", id).select();
+  if (error) { alert(error.message); renderRows(); return; }
+  await reload(true);
+}
+async function saveWeekPatch(weekId, patch) {
+  const { error } = await sb.from("ts_row_week").update(patch).eq("id", weekId).select();
+  if (error) { alert(error.message); renderRows(); return; }
+  await reload(true);
+}
+async function saveWeekDay(weekId, i, el) {
+  const v = parseHours(el.value);
+  if (v === undefined || v === null) { alert("Години — число (0, якщо в цей день не працює / немає уроків)."); renderRows(); return; }
+  const w = S.weeks.find(x => x.id === weekId);
+  const hours = [...w.hours]; hours[i] = v;
+  await saveWeekPatch(weekId, { hours });
+}
+async function saveCycle(weekId, field, el) {
+  const w = S.weeks.find(x => x.id === weekId);
+  const arr = listToArr(el.value);
+  if (arr.some(x => isNaN(x) || x < 0)) { alert("Числа через «/», напр. 24 / 0 / 0 / 0."); renderRows(); return; }
+  if (field === "hours") {
+    if (!arr.length || arr.length > 31) { alert("Цикл — від 1 до 31 дня."); renderRows(); return; }
+    const fit = a => a ? arr.map((_, i) => num(a[i])) : null;   // нічні/вечірні підганяємо під нову довжину
+    await saveWeekPatch(weekId, { hours: arr, night: fit(w.night), evening: fit(w.evening) });
+  } else {
+    if (arr.length && arr.length !== w.hours.length) { alert(`Потрібно ${w.hours.length} чисел — стільки ж, скільки днів у циклі.`); renderRows(); return; }
+    await saveWeekPatch(weekId, { [field]: arr.length ? arr : null });
+  }
+}
+function defaultWeek(kind, staff, from) {
+  return kind === "cycle"
+    ? { kind: "cycle", hours: [24, 0, 0, 0], night: [8, 0, 0, 0], cycle_start: from, zero_off: true }
+    : { kind: "week", hours: staff ? [8, 8, 8, 8, 8, 0, 0] : [0, 0, 0, 0, 0, 0, 0], zero_off: staff };
+}
+async function newWeek(rowId, kind) {
+  const d = prompt("З якої дати діє графік? (РРРР-ММ-ДД)", monthFirst());
+  if (!d || !/^\d{4}-\d{2}-\d{2}$/.test(d)) return;
+  const cur = weekFor(S.weeks, rowId, d);
+  const row = S.rows.find(r => r.id === rowId);
+  const base = cur && cur.kind === kind
+    ? { kind, hours: cur.hours, night: cur.night, evening: cur.evening, cycle_start: cur.cycle_start, zero_off: cur.zero_off }
+    : defaultWeek(kind, row?.sheet === "staff", d);
+  const { error } = await sb.from("ts_row_week").insert({ row_id: rowId, valid_from: d, ...base }).select();
+  if (error) { alert(error.message); return; }
+  await reload(true);
+}
+async function addRow() {
+  const v = id => document.getElementById(id).value.trim();
+  let tid = +v("nr-t");
+  if (!v("nr-p")) { showMsg("nr-msg", "Вкажіть посаду.", "err"); return; }
+  if (v("nr-r") && parseRate(v("nr-r")) === null) { showMsg("nr-msg", "Ставка — число від 0,01 до 3 (напр., 0,5).", "err"); return; }
+  if (v("nr-new")) {
+    const { data, error } = await sb.from("teacher").insert({ full_name: v("nr-new") }).select();
+    if (error) { showMsg("nr-msg", error.message, "err"); return; }
+    tid = data[0].id;
+  }
+  const from = v("nr-f") || null;
+  const { data, error } = await sb.from("ts_row").insert({ teacher_id: tid, position: v("nr-p"), name_note: v("nr-n") || null,
+    tab_no: v("nr-tab") || null, rate: v("nr-r") ? parseRate(v("nr-r")) : null, date_from: from, sort: parseInt(v("nr-s"), 10) || 0, sheet: S.sheet }).select();
+  if (error) { showMsg("nr-msg", error.message, "err"); return; }
+  const start = from || monthFirst();
+  await sb.from("ts_row_week").insert({ row_id: data[0].id, valid_from: start, ...defaultWeek(v("nr-k"), S.sheet === "staff", start) }).select();
+  await reload(true);
+}
+async function delRow(id) {
+  if (!confirm("Видалити рядок разом із його графіком, замінами й правками? (Звільнення краще оформити датою «по».)")) return;
+  const { error } = await sb.from("ts_row").delete().eq("id", id);
+  if (error) { alert(error.message); return; }
+  await reload(true);
+}
+
+// =====================================================================
+//  ПОДАНІ ТАБЕЛІ (знімки) і коригуючий
+// =====================================================================
+async function submitSheet() {
+  if (!canEdit()) return;
+  const kind = document.getElementById("exp-kind").value, fill = document.getElementById("exp-date").value;
+  if (!fill) { alert("Вкажіть дату заповнення."); return; }
+  const toDay = kind === "проміжний" ? readToDay() : null;
+  if (kind === "проміжний" && !toDay) return;
+  const res = toDay ? computeMonth(S.ym.y, S.ym.m, S, { sheet: S.sheet, toDay }) : S.res;
+  const errs = res.issues.filter(i => i.level === "err").length;
+  const msg = `Зафіксувати ${kind} табель ${S.sheet === "staff" ? "обслуговуючого персоналу " : ""}за ${MONTHS[S.ym.m - 1].toLowerCase()} ${S.ym.y}${toDay ? " (по " + toDay + "-е)" : ""} від ${uaDate(fill)} як поданий?\n\n` +
+    `Застосунок збереже знімок усіх рядків. Якщо потім щось зміниться, вкладка «Подані табелі» покаже різницю, ` +
+    `а «Excel → коригуючий» сформує табель лише зі зміненими рядками.` + (errs ? `\n\nУвага: є ${errs} помилок у перевірці.` : "");
+  if (!confirm(msg)) return;
+  const snap = makeSnapshot(res, { kind, fill_date: fill });
+  const { error } = await sb.from("ts_sheet").insert({ month: monthFirst(), kind, fill_date: fill, snapshot: snap,
+    sheet: S.sheet, to_day: toDay }).select();
+  if (error) { alert(error.message); return; }
+  await reload();
+}
+function readToDay() {
+  const v = parseInt(document.getElementById("exp-to").value, 10);
+  const n = S.res.days.length;
+  if (!v || v < 1 || v >= n) { alert(`Для проміжного табеля вкажіть «по число» від 1 до ${n - 1}.`); return null; }
+  return v;
+}
+function renderVersions() {
+  const area = document.getElementById("ver-area");
+  let h = `<h2>Подані табелі за ${MONTHS[S.ym.m - 1].toLowerCase()} ${S.ym.y}</h2>
+    <p class="hint">Тут зберігаються знімки того, що пішло в Департамент («✔ Зафіксувати як поданий»).
+      З останнім знімком порівнюється поточний стан: змінені рядки потрапляють у коригуючий табель.</p>`;
+  if (!S.sheets.length) { area.innerHTML = h + `<p class="hint">Табель за цей місяць ще не фіксувався як поданий.</p>`; return; }
+  h += `<table class="t"><thead><tr><th>Вид</th><th>Дата заповнення</th><th>Зафіксовано</th><th>Рядків</th><th>Дн / год</th><th></th></tr></thead><tbody>`;
+  S.sheets.forEach((s, i) => {
+    const t = s.snapshot.totals || {};
+    h += `<tr><td>${esc(s.kind)}${s.to_day ? ` (по ${s.to_day}-е)` : ""}</td><td>${uaDate(s.fill_date)}</td><td>${new Date(s.created_at).toLocaleString("uk-UA")}</td>
+      <td>${s.snapshot.rows.length}</td><td>${t.days ?? ""} / ${t.hours != null ? fmtH(t.hours) : ""}</td>
+      <td style="white-space:nowrap;"><button class="btn" onclick="exportSnapshot(${s.id})">⬇ Excel (як подано)</button>
+        ${canEdit() ? `<button class="x-btn" title="Видалити знімок" onclick="delSheet(${s.id})">×</button>` : ""}</td></tr>`;
+  });
+  h += `</tbody></table>`;
+  const last = lastSheet();
+  if (!last) { area.innerHTML = h + `<p class="hint">Повного табеля за місяць ще не подано (лише проміжний). Після кінця місяця сформуйте «уточнюючий» і зафіксуйте його.</p>`; return; }
+  const cur = currentSnapshot(), d = diffSnapshots(last.snapshot, cur);
+  const n = d.changed.length + d.added.length + d.removed.length;
+  h += `<h3>Що змінилося після останнього подання (${uaDate(last.fill_date)})</h3>`;
+  if (!n) h += `<div class="msg ok">Змін немає — коригуючий табель не потрібен.</div>`;
+  else {
+    const P = new Map(last.snapshot.rows.map(r => [r.row_id, r])), C = new Map(cur.rows.map(r => [r.row_id, r]));
+    const show = (c, h2) => `${c || "·"}${h2 && h2 !== "X" ? " " + h2 : ""}`;
+    h += `<div class="msg warn">Змінено рядків: ${n}. Сформуйте «Excel → коригуючий» і зафіксуйте його як поданий.</div><ul class="diff-list">`;
+    for (const id of d.changed) {
+      const p = P.get(id), c = C.get(id);
+      const dd = diffDays(p, c).map(x => `${x.d}: ${show(...x.from)} → <b>${show(...x.to)}</b>`).join("; ");
+      h += `<li><b>${esc(c.name)}</b> (${esc(c.position)}): ${dd || "змінено ПІБ/посаду"}; разом ${p.tot.days}/${fmtH(p.tot.hours)} → <b>${c.tot.days}/${fmtH(c.tot.hours)}</b></li>`;
+    }
+    for (const id of d.added) { const c = C.get(id); h += `<li><b>${esc(c.name)}</b> (${esc(c.position)}): новий рядок</li>`; }
+    for (const id of d.removed) { const p = P.get(id); h += `<li><b>${esc(p.name)}</b> (${esc(p.position)}): рядка більше немає в табелі</li>`; }
+    h += `</ul>`;
+  }
+  area.innerHTML = h;
+}
+async function delSheet(id) {
+  if (!confirm("Видалити цей знімок поданого табеля? Порівняння піде з попереднім.")) return;
+  const { error } = await sb.from("ts_sheet").delete().eq("id", id);
+  if (error) { alert(error.message); return; }
+  await reload();
+}
+
+// =====================================================================
+//  НАЛАШТУВАННЯ
+// =====================================================================
+function renderSettings() {
+  const s = S.settings || {}, ed = canEdit() ? "" : "disabled";
+  const f = (label, field, wide) => `<div ${wide ? 'style="grid-column:1/-1"' : ""}><label>${label}</label>
+    <input value="${esc(s[field] || "")}" ${ed} onchange="saveSetting('${field}', this.value)"></div>`;
+  const sel = (label, field, opts) => `<div><label>${label}</label><select ${ed} onchange="saveSetting('${field}', this.value)">
+    ${opts.map(([v, t]) => `<option value="${v}" ${String(s[field]) === v ? "selected" : ""}>${t}</option>`).join("")}</select></div>`;
+  let h = `<h2>Налаштування форми</h2><div class="grid2">
+    ${f("Назва закладу (рядок 2)", "institution", true)}
+    ${f("Код ЄДРПОУ", "edrpou")}
+    ${f("ЗАТВЕРДЖУЮ: посада", "approver_position")}
+    ${f("ЗАТВЕРДЖУЮ: ПІБ", "approver_name")}
+    ${f("Заголовок табеля педпрацівників", "title", true)}
+    ${f("Відповідальна особа (педпрацівники): посада", "responsible_position")}
+    ${f("Відповідальна особа (педпрацівники): ПІБ", "responsible_name")}
+    ${f("Заголовок табеля обслуговуючого персоналу", "title_staff", true)}
+    ${f("Відповідальна особа (персонал): посада", "responsible_position_staff")}
+    ${f("Відповідальна особа (персонал): ПІБ", "responsible_name_staff")}
+    ${f("Примітка: заголовок", "note_title")}
+    </div>
+    <label>Примітка під таблицею (кожен пункт з нового рядка; друкується в табелі педпрацівників)</label>
+    <textarea style="min-height:80px;font-family:inherit;font-size:14px;" ${ed} onchange="saveSetting('note_lines', this.value)">${esc(s.note_lines || "")}</textarea>
+    <h3>Друк</h3><div class="grid2">
+    ${sel("Папір", "paper", [["A4", "А4, альбомна"], ["A3", "А3, альбомна"], ["A3x2", "А3 на двох аркушах А4"]])}
+    ${sel("Вид форми", "form", [["full", "повна (П-5): коди й години"], ["short", "скорочена: без нічних, вечірніх, святкових, окладу"], ["oneline", "однорядкова: один рядок на посаду"]])}
+    ${sel("Табельний номер", "show_tab_no", [["false", "не показувати"], ["true", "показувати (колонка B)"]])}
+    ${sel("Колонка «Ставка / навантаження» (після ПІБ, посади)", "show_rate", [["none", "не показувати"], ["rate", "ставка"], ["load", "навантаження, год/тиж"], ["both", "ставка й навантаження (два рядки)"]])}
+    </div>
+    <h3>Календар: винятки</h3>
+    <p class="hint">За замовчуванням пн–пт робочі, сб і нд — вихідні. Під час воєнного стану святкові дні не є вихідними.
+      Якщо держава оголосить вихідний, перенесе робочий день чи скоротить передсвятковий — додайте виняток.
+      Святковий день: персонал за змінним графіком працює, години йдуть у «вихідних, святкових»; до щорічної відпустки не входить.</p>`;
+  h += `<div id="cal-list" class="loading">Завантаження…</div>`;
+  if (canEdit()) h += `<div class="grid2" style="margin-top:8px;">
+      <div><label>Дата</label><input type="date" id="cal-d" value="${monthFirst()}"></div>
+      <div><label>Тип</label><select id="cal-w">
+        <option value="holiday">святковий (неробочий)</option><option value="off">вихідний (перенесення)</option>
+        <option value="work">робочий (перенесення)</option><option value="short">скорочений робочий</option></select></div>
+      <div><label>Скорочення, год (для скороченого)</label><input id="cal-s" value="1"></div>
+      <div><label>Примітка</label><input id="cal-n" placeholder="напр., День Незалежності"></div>
+    </div><button class="btn" style="margin-top:10px;" onclick="addCal()">+ Додати виняток</button>`;
+  h += `<h3>Коди неявок</h3><table class="t" style="max-width:760px;"><thead><tr><th>Код</th><th>Назва</th><th>№</th><th>Колонка форми</th></tr></thead><tbody>
+    ${S.codes.map(c => `<tr><td><b>${esc(c.code)}</b></td><td>${esc(c.name)}</td><td>${c.num ?? ""}</td><td>${c.grp === "work" ? "відпрацьовано" : c.grp}</td></tr>`).join("")}
+    </tbody></table><p class="hint">Назви кодів змінюються в таблиці ts_code у Supabase.</p>`;
+  document.getElementById("cfg-area").innerHTML = h;
+  loadCalendarAll();
+}
+const CAL_KIND = c => c.is_holiday ? "святковий" : !c.is_workday ? "вихідний" : c.short_hours > 0 ? `скорочений (−${fmtH(c.short_hours)} год)` : "робочий";
+async function loadCalendarAll() {
+  const { data, error } = await sb.from("ts_calendar").select("*").order("day");
+  const box = document.getElementById("cal-list");
+  if (!box) return;
+  if (error) { box.innerHTML = errBox(error.message); return; }
+  box.className = "";
+  box.innerHTML = data.length ? `<table class="t" style="max-width:640px;"><tbody>${data.map(c => `<tr><td>${uaDate(c.day)}</td>
+      <td>${CAL_KIND(c)}</td><td>${esc(c.note || "")}</td>
+      <td>${canEdit() ? `<button class="x-btn" onclick="delCal('${c.day}')">×</button>` : ""}</td></tr>`).join("")}</tbody></table>`
+    : `<p class="hint">Винятків немає.</p>`;
+}
+async function saveSetting(field, value) {
+  let v = String(value).trim() || null;
+  if (field === "show_tab_no") v = v === "true";
+  const { error } = await sb.from("ts_settings").update({ [field]: v }).eq("id", 1).select();
+  if (error) { alert(error.message); return; }
+  S.settings[field] = v;
+}
+async function addCal() {
+  const d = document.getElementById("cal-d").value;
+  if (!d) return;
+  const k = document.getElementById("cal-w").value;
+  const sh = parseHours(document.getElementById("cal-s").value) || 0;
+  const row = { day: d, is_workday: k === "work" || k === "short", is_holiday: k === "holiday",
+                short_hours: k === "short" ? sh : 0, note: document.getElementById("cal-n").value.trim() || null };
+  if (k === "short" && !sh) { alert("Вкажіть, на скільки годин скорочено день."); return; }
+  const { error } = await sb.from("ts_calendar").upsert(row, { onConflict: "day" }).select();
+  if (error) { alert(error.message); return; }
+  await reload(true); renderSettings();
+}
+async function delCal(d) {
+  const { error } = await sb.from("ts_calendar").delete().eq("day", d);
+  if (error) { alert(error.message); return; }
+  await reload(true); renderSettings();
+}
+
+// =====================================================================
+//  ДОВІДКА
+// =====================================================================
+function renderHelp() {
+  document.getElementById("help-area").innerHTML = `
+    <h2>Як вести табель</h2>
+    <ol>
+      <li><b>Працівники і розклад.</b> Один рядок — одна посада (як у формі). Для кожного рядка — години за днями тижня.
+        0 означає, що уроків у цей день немає: у табелі стоятиме <b>«Р» без годин</b>, а не вихідний.
+        Коли зміниться розклад (напр., 2 семестр) — «+ з дати» і нові години.</li>
+      <li><b>Неявки</b> вносяться періодом: ТН, В, НА тощо. Лікарняний — на всі посади працівника.
+        Код ставиться на кожен робочий день періоду, вихідні лишаються X.</li>
+      <li><b>ЛН з ПФУ.</b> Вставте таблицю листків непрацездатності з кабінету ПФУ — застосунок покаже, чого бракує, і додасть ТН одним кліком.</li>
+      <li><b>Заміни</b> — за наказом про заміщення: хто, коли, скільки годин. У табелі з'явиться «n+k», а години підуть у «заміни».</li>
+      <li><b>Табель.</b> Перевірте сітку й зауваження вгорі. Клітинку можна змінити вручну (рамка) — для рідкісних винятків.</li>
+      <li><b>Excel за формою</b> → «звичайний», дата заповнення → передати на підпис. Після подання — <b>«✔ Зафіксувати як поданий»</b>.</li>
+      <li>Якщо після подання щось змінилося (пізній ЛН, правка) — у статусі з'явиться «змінено рядків».
+        Оберіть <b>«коригуючий»</b>: у файл потраплять лише змінені рядки. Потім знову зафіксуйте як поданий.</li>
+      <li><b>Уточнюючий</b> — повний табель з позначкою «уточнюючий» (наприклад, коли змін багато).</li>
+      <li><b>Проміжний</b> — табель за частину місяця («по число», напр. 15) під аванс. Після кінця місяця — уточнюючий за весь місяць.</li>
+    </ol>
+    <h3>Обслуговуючий персонал</h3>
+    <p>Перемикач «Табель» угорі. Для персоналу графік — тиждень з позначкою «0 = вихідний» (тоді в дні без годин стоїть X)
+      або цикл: дата початку й години по днях циклу, напр. сторож «доба через три»: 24 / 0 / 0 / 0, нічних 8 / 0 / 0 / 0.
+      Нічні години й робота у святкові дні (позначені в календарі) рахуються в колонках «нічних» і «вихідних, святкових».</p>
+    <h3>Неявки</h3>
+    <ul><li>Лікарняний завжди переважає відпустку. Якщо ЛН припав на щорічну відпустку, вгорі вкладки «Неявки» з'явиться пропозиція продовжити її на ці дні.</li>
+        <li>«Тривалість» сама рахує дату закінчення; святкові дні до щорічної відпустки не входять.</li>
+        <li>Дні тижня — для неявок лише в певні дні (напр., навчальна відпустка щочетверга).</li></ul>
+    <h3>Друк</h3>
+    <p>У «⚙ Налаштуваннях»: папір (А4, А3, А3 на двох А4), вид форми (повна, скорочена, однорядкова), табельний номер.</p>
+    <h3>Як рахується клітинка</h3>
+    <p>Поза періодом роботи (прийом/звільнення) — порожньо → ручна правка → вихідний (X) → неявка → «Р» з годинами за розкладом + заміни.</p>
+    <h3>Підсумки</h3>
+    <ul><li>Відпрацьовано: дні з «Р»; години — сума годин разом із замінами (як у примітці до форми).</li>
+        <li>Неявки: дні й години за кодами, розкладені по колонках форми (8–10, 11–17, 18–19 … 26–27, 28–30).</li></ul>
+    <p class="hint">Доступ: змінювати може заступник директора (роль deputy), директор і бухгалтер — переглядати й завантажувати Excel.</p>`;
+}
+
+// ---------------- старт ----------------
+(function () {
+  const cfg = loadConfig();
+  if (cfg.url) document.getElementById("cfg-url").value = cfg.url;
+  if (cfg.key) document.getElementById("cfg-key").value = cfg.key;
+  window.addEventListener("click", e => {
+    const pop = document.getElementById("pop");
+    if (pop.style.display === "block" && !pop.contains(e.target) && !e.target.closest("td.d")) closePop();
+  });
+  init();
+})();
+</script>
+
+<!-- =================================================================
+     ЕКСПОРТ У EXCEL ЗА ФОРМОЮ (як у файлі EasyTimesheet, з виправленнями)
+     ================================================================= -->
+<script>
+"use strict";
+
+const XF = "Times New Roman";
+const THIN = { style: "thin" };
+const BORDER = { top: THIN, left: THIN, bottom: THIN, right: THIN };
+
+// Колонки форми: A №, B, C, D ПІБ/посада, E, F…AJ — дні 1–31, AK днів, AL годин, AM заміни, AN нічних,
+// AO вечірніх, AP вихідних, AQ, AR, AS всього неявок, AT…BA — з причин, BB оклад
+function colNum(letter) { let n = 0; for (const ch of letter) n = n * 26 + ch.charCodeAt(0) - 64; return n; }
+function colLetter(n) { let s = ""; while (n) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; }
+const DAY_COL = d => colLetter(5 + d);     // день 1 → F
+
+/* Будує книгу Excel.
+   snap — знімок (makeSnapshot), rowsToShow — масив row_id (null — усі),
+   opt: { kind, fillDate, settings }  — вид форми й папір беруться з налаштувань */
+function buildWorkbook(ExcelJSLib, snap, rowsToShow, opt) {
+  const st = opt.settings || {};
+  const staff = snap.sheet === "staff";
+  const form = st.form || "full";                 // full | short | oneline
+  const one = form === "oneline";
+  const showTab = st.show_tab_no === true || st.show_tab_no === "true";
+  const pos = x => x.position;
+  // колонка E: ставка / навантаження
+  const rmode = ["rate", "load", "both"].includes(st.show_rate) ? st.show_rate : "none";
+  const rateTxt = v => v == null ? null : Number(Math.round(v * 100) / 100);
+  const loadTxt = v => v ? Math.round(v * 10) / 10 : null;
+  const [y, m] = snap.month.split("-").map(Number);
+  const nDays = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const toDay = snap.to_day || nDays;
+  const rows = rowsToShow ? snap.rows.filter(r => rowsToShow.includes(r.row_id)) : snap.rows;
+  const paper = st.paper || "A4";
+
+  const wb = new ExcelJSLib.Workbook();
+  wb.creator = "admin_school · табель";
+  const ws = wb.addWorksheet("Табель", {
+    pageSetup: { paperSize: paper === "A3" ? 8 : 9, orientation: "landscape", fitToPage: true,
+                 fitToWidth: paper === "A3x2" ? 2 : 1, fitToHeight: 0,
+                 margins: { left: 0.31, right: 0.2, top: 0.55, bottom: 0.4, header: 0.2, footer: 0.2 },
+                 printTitlesRow: "10:22" },
+    views: [{ showGridLines: false }]
+  });
+  // ширини
+  const W = { A: 2.55, B: showTab ? 6 : 1.2, C: 1.2, D: 33.11, E: rmode === "none" ? 1.5 : rmode === "both" && one ? 7 : rmode === "load" ? 5 : 4.6, AJ: 3.33, AK: 3.2, AL: 4.6, AM: 3.4, AN: 3.0, AO: 3.0, AP: 3.0,
+              AQ: 1.2, AR: 1.2, AS: 4.11, AT: 4.0, AU: 4.0, AV: 4.0, AW: 4.0, AX: 4.0, AY: 4.0, AZ: 4.0, BA: 4.0, BB: 6.66 };
+  for (let c = 1; c <= colNum("BB"); c++) {
+    const L = colLetter(c);
+    ws.getColumn(c).width = W[L] ?? (c >= 6 && c <= 36 ? (one ? 3.6 : 3.33) : 4);
+  }
+  // скорочена форма: без нічних, вечірніх, святкових, службових колонок і окладу
+  if (form !== "full") for (const L of ["AN", "AO", "AP", "AQ", "AR", "BB"]) ws.getColumn(L).hidden = true;
+
+  const cell = (addr, value, o = {}) => {
+    const c = ws.getCell(addr);
+    if (value !== undefined && value !== null && value !== "") c.value = value;
+    c.font = { name: XF, size: o.size || 11, bold: !!o.bold };
+    c.alignment = { horizontal: o.h || "center", vertical: o.v || "middle", wrapText: !!o.wrap, textRotation: o.rot || 0, shrinkToFit: !!o.shrink };
+    if (o.border) c.border = BORDER;
+    return c;
+  };
+  const merge = (range, value, o = {}) => {
+    const [a, b] = range.split(":");
+    if (a !== b) ws.mergeCells(range);
+    cell(a, value, o);
+    if (o.border) {   // рамка на всіх клітинках об'єднання
+      const ca = colNum(a.match(/[A-Z]+/)[0]), cb = colNum(b.match(/[A-Z]+/)[0]);
+      const ra = +a.match(/\d+/)[0], rb = +b.match(/\d+/)[0];
+      for (let r = ra; r <= rb; r++) for (let c = ca; c <= cb; c++) ws.getCell(`${colLetter(c)}${r}`).border = BORDER;
+    }
+  };
+  const r1 = v => v ? Math.round(v * 10) / 10 : null;
+
+  // ---------- шапка ----------
+  const prefix = { "коригуючий": "КОРИГУЮЧИЙ ", "уточнюючий": "УТОЧНЮЮЧИЙ ", "проміжний": "ПРОМІЖНИЙ " }[opt.kind] || "";
+  const title = staff ? (st.title_staff || "ТАБЕЛЬ ОБЛІКУ ВИКОРИСТАННЯ РОБОЧОГО ЧАСУ ОБСЛУГОВУЮЧОГО ПЕРСОНАЛУ")
+                      : (st.title || "ТАБЕЛЬ ОБЛІКУ ВИКОРИСТАННЯ РОБОЧОГО ЧАСУ ПЕДАГОГІЧНИХ ПРАЦІВНИКІВ");
+  ws.getRow(1).height = 12; ws.getRow(5).height = 9;
+  for (const r of [2, 3, 4, 6, 7, 8, 9]) ws.getRow(r).height = 19.5;
+  merge(form === "full" ? "A2:AM2" : "A2:AR2", st.institution || "", { size: 16 });
+  // блок «ЗАТВЕРДЖУЮ / Дата заповнення / Звітний період»: у скороченій формі колонки AN–AR приховані, тож блок зсуваємо
+  const B = form === "full"
+    ? { top: "AN", date: ["AN", "AS"], from: ["AT", "AW"], to: ["AX", "BA"], per: ["AT", "BA"] }
+    : { top: "AS", date: ["AS", "AU"], from: ["AV", "AX"], to: ["AY", "BA"], per: ["AV", "BA"] };
+  merge(`${B.top}2:BA2`, "ЗАТВЕРДЖУЮ", { size: 12 });
+  cell(`${B.top}${form === "full" ? 4 : 3}`, st.approver_position || "Директор", { size: 12, h: "left" });
+  cell("BA4", st.approver_name || "", { size: 12, h: "right" });
+  cell("A6", st.edrpou ? `Ідентифікаційний код ЄДРПОУ ${st.edrpou}` : "", { size: 14, h: "left" });
+  merge(`${B.date[0]}6:${B.date[1]}7`, "Дата\nзаповнення", { size: 12, wrap: true, border: true });
+  merge(`${B.per[0]}6:${B.per[1]}6`, "Звітний період", { size: 12, border: true });
+  merge(`${B.from[0]}7:${B.from[1]}7`, "з", { size: 12, border: true });
+  merge(`${B.to[0]}7:${B.to[1]}7`, "по", { size: 12, border: true });
+  merge(`${B.date[0]}8:${B.date[1]}8`, uaDate(opt.fillDate), { size: 12, border: true });
+  merge(`${B.from[0]}8:${B.from[1]}8`, uaDate(snap.month), { size: 12, border: true });
+  merge(`${B.to[0]}8:${B.to[1]}8`, uaDate(isoDate(y, m, toDay)), { size: 12, border: true });
+  merge("A8:AM8", prefix + title, { size: prefix ? 14 : 16, bold: true });
+  merge("A9:AM9", `за ${MONTHS[m - 1]} ${y} року`, { size: 14, bold: true });
+
+  // ---------- шапка таблиці (рядки 10–22) ----------
+  for (let r = 10; r <= 22; r++) ws.getRow(r).height = 14.25;
+  const hb = { border: true, wrap: true };
+  merge("A10:A22", "№ п/п", { ...hb, size: 12, rot: 90 });
+  merge("B10:B22", showTab ? "Табельний номер" : null, { ...hb, size: 9, rot: 90 });
+  merge("C10:C22", null, hb);
+  merge("D10:D22", "ПІБ,\nПосада", { ...hb, size: 12 });
+  merge("E10:E22", { none: null, rate: "Ставка", load: "Навантаження, год/тиж", both: "Ставка /\nнавантаження, год/тиж" }[rmode],
+        { ...hb, size: 9, rot: 90 });
+  merge("F10:AJ10", one ? "Відмітки про явки та неявки за числами місяця (годин; для неявок — код)"
+                        : "Відмітки про явки та неявки за числами місяця (годин)", { ...hb, size: 12 });
+  for (let d = 1; d <= 31; d++) merge(`${DAY_COL(d)}11:${DAY_COL(d)}22`, d <= nDays ? pad2(d) : null, { ...hb, size: 11 });
+  merge("AK10:AP10", "Відпрацьовано за місяць", { ...hb, size: 11 });
+  merge("AK11:AK22", "днів", { ...hb, rot: 90 });
+  merge("AL11:AP11", "годин", hb);
+  merge("AL12:AL22", "всього", { ...hb, rot: 90 });
+  merge("AM12:AP12", "з них:", hb);
+  merge("AM13:AM22", staff ? "надурочно" : "заміни", { ...hb, rot: 90 });
+  merge("AN13:AN22", "нічних", { ...hb, rot: 90 });
+  merge("AO13:AO22", "вечірніх", { ...hb, rot: 90 });
+  merge("AP13:AP22", "вихідних, святкових", { ...hb, rot: 90 });
+  merge("AQ10:AQ22", null, hb);
+  merge("AR10:AR22", null, hb);
+  merge("AS10:AS20", "Всього неявок", { ...hb, size: 11, rot: 90 });
+  merge("AT10:BA10", "з причин за місяць", { ...hb, size: 11 });
+  const grpHead = [["AT", "основна та додаткові відпустки", "8-10"], ["AU", "відп. у зв. з навч., твор. в обов. порядку та інші", "11-17, 22"],
+    ["AV", "відпустки без\nзбереження з/п", "18-19"], ["AW", "перевод на неповний робочий день (тиждень)", "20"],
+    ["AX", "тимчасовий перевод на інше підприємство", "21"], ["AY", "простої, прогули,\nстрайки", "23-25"],
+    ["AZ", "тимчасова\nнепрацездатність", "26-27"], ["BA", "інші", "28-30"]];
+  for (const [c, t, codes] of grpHead) {
+    merge(`${c}11:${c}17`, t, { ...hb, size: 9, rot: 90 });
+    cell(`${c}18`, c === "AW" || c === "AX" ? "код" : "коди", { size: 9, border: true });
+    merge(`${c}19:${c}20`, codes, { ...hb, size: 8 });
+  }
+  for (const c of ["AS", ...grpHead.map(g => g[0])]) merge(`${c}21:${c}22`, one ? "дні" : "дні\nгод.", { ...hb, size: 9 });
+  merge("BB10:BB22", "Оклад, тарифна ставка, грн.", { ...hb, size: 11, rot: 90 });
+
+  // ---------- рядки працівників ----------
+  // повна/скорочена: два рядки (коди / години); однорядкова: один рядок (години, а для неявок — код)
+  const hourVal = t => t === "" || t == null ? null : (/^\d+(,\d+)?$/.test(t) ? Number(t.replace(",", ".")) : t);
+  let r = 23;
+  const sumCell = (addr, v, size = 9) => cell(addr, v === 0 || v === "" || v == null ? null : v, { size, border: true });
+  const span = one ? 0 : 1;
+  rows.forEach((x, i) => {
+    for (let k = 0; k <= span; k++) ws.getRow(r + k).height = one ? 24 : 14.25;
+    const R2 = col => `${col}${r}:${col}${r + span}`;
+    merge(R2("A"), i + 1, { size: 9, border: true });
+    merge(R2("B"), showTab ? (x.tab_no || null) : null, { size: 8, border: true });
+    merge(R2("C"), null, { border: true });
+    if (one) cell(`D${r}`, `${x.name}${x.name_note ? " " + x.name_note : ""}\n${pos(x)}`, { size: 8, h: "left", wrap: true, border: true });
+    else {
+      cell(`D${r}`, x.name + (x.name_note ? " " + x.name_note : ""), { size: 9, h: "left", border: true });
+      cell(`D${r + 1}`, pos(x), { size: 9, h: "left", v: "top", border: true, shrink: true });
+    }
+    if (rmode === "none") merge(R2("E"), null, { border: true });
+    else if (rmode === "both" && !one) {
+      cell(`E${r}`, rateTxt(x.rate), { size: 8, border: true });
+      cell(`E${r + 1}`, loadTxt(x.load), { size: 8, border: true });
+    } else if (rmode === "both") {
+      const a = rateTxt(x.rate), b = loadTxt(x.load);
+      merge(R2("E"), a == null && b == null ? null : `${a == null ? "–" : String(a).replace(".", ",")} / ${b == null ? "–" : String(b).replace(".", ",")}`, { size: 8, border: true });
+    } else merge(R2("E"), rmode === "rate" ? rateTxt(x.rate) : loadTxt(x.load), { size: 8, border: true });
+    for (let d = 1; d <= 31; d++) {
+      const L = DAY_COL(d);
+      const c = x.cells[d - 1];
+      if (one) {
+        let v = null;
+        if (c) v = c[0] === "Р" ? (hourVal(c[1]) ?? "Р") : (c[0] || null);
+        cell(`${L}${r}`, v, { size: 8, border: true });
+      } else {
+        cell(`${L}${r}`, c ? c[0] || null : null, { size: 8, border: true });
+        cell(`${L}${r + 1}`, c ? hourVal(c[1]) : null, { size: 8, border: true });
+      }
+    }
+    const t = x.tot;
+    merge(R2("AK"), t.days || null, { size: 9, border: true });
+    merge(R2("AL"), r1(t.hours), { size: 9, border: true });
+    merge(R2("AM"), r1(t.zam), { size: 9, border: true });
+    merge(R2("AN"), r1(t.night), { size: 9, border: true });
+    merge(R2("AO"), r1(t.eve), { size: 9, border: true });
+    merge(R2("AP"), r1(t.hol), { size: 9, border: true });
+    for (const c of ["AQ", "AR"]) merge(R2(c), null, { border: true });
+    sumCell(`AS${r}`, t.absDays); if (!one) sumCell(`AS${r + 1}`, r1(t.absHours), 8);
+    for (const g of GROUPS) {
+      const v = t.g[g];
+      sumCell(`${g}${r}`, v ? v[0] : null); if (!one) sumCell(`${g}${r + 1}`, v ? r1(v[1]) : null, 8);
+    }
+    merge(R2("BB"), null, { border: true });
+    r += span + 1;
+  });
+
+  // ---------- РАЗОМ ----------
+  const T = { days: 0, hours: 0, zam: 0, night: 0, eve: 0, hol: 0, absDays: 0, absHours: 0, g: {} };
+  for (const x of rows) {
+    for (const k of Object.keys(T)) if (k !== "g") T[k] += x.tot[k] || 0;
+    for (const [g, v] of Object.entries(x.tot.g)) { const a = T.g[g] ||= [0, 0]; a[0] += v[0]; a[1] += v[1]; }
+  }
+  const RR = col => `${col}${r}:${col}${r + span}`;
+  if (!one) ws.getRow(r + 1).height = 14.25;
+  merge(`A${r}:AJ${r + span}`, "РАЗОМ:", { size: 12, bold: true, h: "right", border: true });
+  merge(RR("AK"), T.days || null, { size: 8, border: true });
+  merge(RR("AL"), r1(T.hours), { size: 8, border: true });
+  merge(RR("AM"), r1(T.zam), { size: 8, border: true });
+  merge(RR("AN"), r1(T.night), { size: 8, border: true });
+  merge(RR("AO"), r1(T.eve), { size: 8, border: true });
+  merge(RR("AP"), r1(T.hol), { size: 8, border: true });
+  for (const c of ["AQ", "AR"]) merge(RR(c), null, { border: true });
+  sumCell(`AS${r}`, T.absDays, 8); if (!one) sumCell(`AS${r + 1}`, r1(T.absHours), 8);
+  for (const g of GROUPS) { const v = T.g[g]; sumCell(`${g}${r}`, v ? v[0] : null, 8); if (!one) sumCell(`${g}${r + 1}`, v ? r1(v[1]) : null, 8); }
+  merge(RR("BB"), null, { border: true });
+  r += span + 2;
+
+  // ---------- примітка, відповідальна особа ----------
+  const notes = staff ? [] : String(st.note_lines || "").split(/\r?\n/).filter(s => s.trim());
+  if (notes.length) {
+    cell(`AC${r}`, st.note_title || "*Примітка", { size: 11, h: "left" });
+    notes.forEach((t, k) => cell(`AG${r + k}`, t, { size: 11, h: "left" }));
+  }
+  const respPos = staff ? (st.responsible_position_staff || st.responsible_position) : st.responsible_position;
+  const respName = staff ? (st.responsible_name_staff || st.responsible_name) : st.responsible_name;
+  cell(`A${r + 1}`, "     Відповідальна", { size: 12, bold: true, h: "left" });
+  cell(`A${r + 2}`, "             особа", { size: 12, bold: true, h: "left" });
+  cell(`I${r + 2}`, respPos || "", { size: 12, h: "left" });
+  cell(`A${r + 5}`, '"__"_________ 20__р.', { size: 12, h: "left" });
+  cell(`O${r + 5}`, `____________ ${respName || ""}`, { size: 12, h: "left" });
+  cell(`O${r + 6}`, "(підпис)", { size: 10, h: "left" });
+  ws.pageSetup.printArea = `A1:BB${r + 6}`;
+  return wb;
+}
+
+async function downloadWorkbook(wb, name) {
+  const buf = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+function fileName(kind, ym, sheet, toDay) {
+  const k = kind === "звичайний" ? "" : " (" + kind + (toDay ? " по " + toDay : "") + ")";
+  return `Табель${sheet === "staff" ? " персонал" : ""} ${MONTHS[ym.m - 1].toLowerCase()} ${ym.y}${k}.xlsx`;
+}
+
+async function exportXlsx() {
+  if (typeof ExcelJS === "undefined") { alert("Бібліотека ExcelJS не завантажилась. Перевірте інтернет."); return; }
+  const kind = document.getElementById("exp-kind").value, fill = document.getElementById("exp-date").value;
+  if (!fill) { alert("Вкажіть дату заповнення."); return; }
+  const toDay = kind === "проміжний" ? readToDay() : null;
+  if (kind === "проміжний" && !toDay) return;
+  const res = toDay ? computeMonth(S.ym.y, S.ym.m, S, { sheet: S.sheet, toDay }) : S.res;
+  const snap = toDay ? makeSnapshot(res, {}) : currentSnapshot();
+  let only = null;
+  if (kind === "коригуючий") {
+    const last = lastSheet();
+    if (!last) { alert("Коригуючий табель порівнює з поданим, а табель за цей місяць ще не фіксувався як поданий.\n\nЯкщо основний табель подавали поза застосунком, спершу зафіксуйте поточний стан… або сформуйте «уточнюючий»."); return; }
+    const d = diffSnapshots(last.snapshot, snap);
+    only = [...d.changed, ...d.added];
+    if (!only.length) { alert("Після останнього подання змін немає — коригуючий табель не потрібен."); return; }
+  }
+  const errs = res.issues.filter(i => i.level === "err").length;
+  if (errs && !confirm(`У перевірці ${errs} помилок. Все одно сформувати файл?`)) return;
+  try {
+    const wb = buildWorkbook(ExcelJS, snap, only, { kind, fillDate: fill, settings: S.settings });
+    await downloadWorkbook(wb, fileName(kind, S.ym, S.sheet, toDay));
+  } catch (e) { console.error(e); alert("Не вдалося сформувати файл: " + e.message); }
+}
+async function exportSnapshot(id) {
+  const s = S.sheets.find(x => x.id === id);
+  if (!s) return;
+  let only = null;
+  if (s.kind === "коригуючий") {   // коригуючий — лише рядки, змінені відносно попереднього знімка
+    const prev = S.sheets.filter(x => x.created_at < s.created_at && x.kind !== "проміжний").at(-1);
+    if (prev) { const d = diffSnapshots(prev.snapshot, s.snapshot); only = [...d.changed, ...d.added]; }
+  }
+  const wb = buildWorkbook(ExcelJS, s.snapshot, only, { kind: s.kind, fillDate: s.fill_date, settings: S.settings });
+  await downloadWorkbook(wb, fileName(s.kind, S.ym, s.sheet, s.to_day));
+}
+if (typeof module !== "undefined") module.exports = { buildWorkbook };
+</script>
+</body>
+</html>
