@@ -1369,7 +1369,6 @@ function renderSettings() {
     ${sel("Папір", "paper", [["A4", "А4, альбомна"], ["A3", "А3, альбомна"], ["A3x2", "А3 на двох аркушах А4"]])}
     ${sel("Вид форми", "form", [["full", "повна (П-5): коди й години"], ["short", "скорочена: без нічних, вечірніх, святкових, окладу"], ["oneline", "однорядкова: один рядок на посаду"]])}
     ${sel("Табельний номер", "show_tab_no", [["false", "не показувати"], ["true", "показувати (колонка B)"]])}
-    ${sel("Колонка «Ставка / навантаження» (після ПІБ, посади)", "show_rate", [["none", "не показувати"], ["rate", "ставка"], ["load", "навантаження, год/тиж"], ["both", "ставка й навантаження (два рядки)"]])}
     </div>
     <h3>Календар: винятки</h3>
     <p class="hint">За замовчуванням пн–пт робочі, сб і нд — вихідні. Під час воєнного стану святкові дні не є вихідними.
@@ -1506,7 +1505,7 @@ function buildWorkbook(ExcelJSLib, snap, rowsToShow, opt) {
   const showTab = st.show_tab_no === true || st.show_tab_no === "true";
   const pos = x => x.position;
   // колонка E: ставка / навантаження
-  const rmode = ["rate", "load", "both"].includes(st.show_rate) ? st.show_rate : "none";
+  const rmode = "both";   // колонка «Ставка / Навантаження» друкується завжди, в обох табелях
   const rateTxt = v => v == null ? null : Number(Math.round(v * 100) / 100);
   const loadTxt = v => v ? Math.round(v * 10) / 10 : null;
   const [y, m] = snap.month.split("-").map(Number);
@@ -1524,7 +1523,7 @@ function buildWorkbook(ExcelJSLib, snap, rowsToShow, opt) {
   });
   // ширини
   // ширини й приховані колонки — як у файлі EasyTimesheet
-  const W = { A: 2.55, B: 6, C: 2.11, D: 29.78, E: rmode === "both" && one ? 7 : rmode === "load" ? 5 : 4.6, AK: 2.89,
+  const W = { A: 2.55, B: 6, C: 2.11, D: 29.78, E: one ? 7 : 5, AK: 2.89,
               AL: 4.11, AM: 4.11, AN: 4.11, AO: 4.11, AP: 4.11, AQ: 2.89, AR: 4.11,
               AS: 4.11, AT: 4.11, AU: 4.11, AV: 4.11, AW: 4.11, AX: 4.11, AY: 4.11, AZ: 4.0, BA: 4.0, BB: 6.66 };
   for (let c = 1; c <= colNum("BB"); c++) {
@@ -1590,8 +1589,7 @@ function buildWorkbook(ExcelJSLib, snap, rowsToShow, opt) {
   merge("B10:B22", showTab ? "Табельний номер" : null, { ...hb, size: 9, rot: 90 });
   merge("C10:C22", null, hb);
   merge("D10:D22", "ПІБ,\nПосада", { ...hb, size: 12 });
-  merge("E10:E22", { none: null, rate: "Ставка", load: "Навантаження, год/тиж", both: "Ставка /\nнавантаження, год/тиж" }[rmode],
-        { ...hb, size: 9, rot: 90 });
+  merge("E10:E22", "Ставка / Навантаження", { ...hb, size: 12, rot: 90 });
   merge("F10:AJ10", one ? "Відмітки про явки та неявки за числами місяця (годин; для неявок — код)"
                         : "Відмітки про явки та неявки за числами місяця (годин)", { ...hb, size: 12 });
   for (let d = 1; d <= 31; d++) merge(`${DAY_COL(d)}11:${DAY_COL(d)}22`, d <= nDays ? pad2(d) : null, { ...hb, size: 11 });
