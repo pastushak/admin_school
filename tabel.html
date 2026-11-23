@@ -499,7 +499,11 @@ function makeSnapshot(res, meta) {
     totals: res.totals
   };
 }
-const rowSig = r => JSON.stringify([r.name, r.name_note, r.position, r.cells, r.tot]);
+// Підпис рядка для порівняння. Ключі сортуємо, числа округлюємо: jsonb у базі змінює порядок ключів.
+const canon = v => Array.isArray(v) ? v.map(canon)
+  : v && typeof v === "object" ? Object.keys(v).sort().reduce((o, k) => (o[k] = canon(v[k]), o), {})
+  : typeof v === "number" ? Math.round(v * 100) / 100 : v;
+const rowSig = r => JSON.stringify(canon([r.name, r.name_note, r.position, r.cells, r.tot]));
 
 // Що змінилося порівняно з поданим знімком: { changed: [row_id], added: [...], removed: [...] }
 function diffSnapshots(prev, cur) {
