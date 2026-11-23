@@ -664,8 +664,20 @@ async function loadMonth() {
   return true;
 }
 
+// Вид форми для поточного табеля і години, які скорочена форма не покаже
+const sheetForm = () => S.sheet === "staff" ? (S.settings.form_staff || "full") : (S.settings.form || "full");
+function hiddenHours(res) {
+  if (sheetForm() === "full") return "";
+  const t = res.totals, parts = [];
+  if (t.hol) parts.push(`${fmtH(t.hol)} год у вихідні/святкові (РВ)`);
+  if (t.night) parts.push(`${fmtH(t.night)} нічних год`);
+  if (t.eve) parts.push(`${fmtH(t.eve)} вечірніх год`);
+  return parts.join(", ");
+}
 function recompute() {
   S.res = computeMonth(S.ym.y, S.ym.m, S, { sheet: S.sheet });
+  const lost = hiddenHours(S.res);
+  if (lost) S.res.issues.push({ level: "warn", text: `Є ${lost} — у скороченій формі цих колонок не видно. Під час експорту застосунок запропонує повну форму.` });
   document.getElementById("cnt-abs").textContent = sheetAbs().length || "";
   document.getElementById("cnt-zam").textContent = sheetSubs().length || "";
   document.getElementById("cnt-ver").textContent = S.sheets.length || "";
@@ -1344,6 +1356,7 @@ async function delSheet(id) {
 // =====================================================================
 //  НАЛАШТУВАННЯ
 // =====================================================================
+const FORM_OPTS = [["full", "повна (П-5): коди й години"], ["short", "скорочена: без нічних, вечірніх, вихідних/святкових, окладу"], ["oneline", "однорядкова: один рядок на посаду"]];
 function renderSettings() {
   const s = S.settings || {}, ed = canEdit() ? "" : "disabled";
   const f = (label, field, wide) => `<div ${wide ? 'style="grid-column:1/-1"' : ""}><label>${label}</label>
@@ -1367,7 +1380,8 @@ function renderSettings() {
     <textarea style="min-height:80px;font-family:inherit;font-size:14px;" ${ed} onchange="saveSetting('note_lines', this.value)">${esc(s.note_lines || "")}</textarea>
     <h3>Друк</h3><div class="grid2">
     ${sel("Папір", "paper", [["A4", "А4, альбомна"], ["A3", "А3, альбомна"], ["A3x2", "А3 на двох аркушах А4"]])}
-    ${sel("Вид форми", "form", [["full", "повна (П-5): коди й години"], ["short", "скорочена: без нічних, вечірніх, святкових, окладу"], ["oneline", "однорядкова: один рядок на посаду"]])}
+    ${sel("Вид форми: педпрацівники", "form", FORM_OPTS)}
+    ${sel("Вид форми: обслуговуючий персонал", "form_staff", FORM_OPTS)}
     ${sel("Табельний номер", "show_tab_no", [["false", "не показувати"], ["true", "показувати (колонка B)"]])}
     </div>
     <h3>Календар: винятки</h3>
@@ -1407,6 +1421,7 @@ async function saveSetting(field, value) {
   const { error } = await sb.from("ts_settings").update({ [field]: v }).eq("id", 1).select();
   if (error) { alert(error.message); return; }
   S.settings[field] = v;
+  if (field === "form" || field === "form_staff") recompute();
 }
 async function addCal() {
   const d = document.getElementById("cal-d").value;
@@ -1456,7 +1471,9 @@ function renderHelp() {
         <li>«Тривалість» сама рахує дату закінчення; святкові дні до щорічної відпустки не входять.</li>
         <li>Дні тижня — для неявок лише в певні дні (напр., навчальна відпустка щочетверга).</li></ul>
     <h3>Друк</h3>
-    <p>У «⚙ Налаштуваннях»: папір (А4, А3, А3 на двох А4), вид форми (повна, скорочена, однорядкова), табельний номер.</p>
+    <p>У «⚙ Налаштуваннях»: папір (А4, А3, А3 на двох А4), вид форми окремо для педпрацівників і персоналу (повна, скорочена, однорядкова), табельний номер.
+      Скорочена форма — без нічних, вечірніх, вихідних/святкових і окладу. Якщо вчитель працював у вихідний, поставте код <b>РВ</b>:
+      застосунок попередить і запропонує повну форму на цей місяць.</p>
     <h3>Як рахується клітинка</h3>
     <p>Поза періодом роботи (прийом/звільнення) — порожньо → ручна правка → вихідний (X) → неявка → «Р» з годинами за розкладом + заміни.</p>
     <h3>Підсумки</h3>
@@ -1500,7 +1517,8 @@ const DAY_COL = d => colLetter(5 + d);     // день 1 → F
 function buildWorkbook(ExcelJSLib, snap, rowsToShow, opt) {
   const st = opt.settings || {};
   const staff = snap.sheet === "staff";
-  const form = st.form || "full";                 // full | short | oneline
+  // full | short | oneline — окремо для табеля педпрацівників (form) і персоналу (form_staff)
+  const form = opt.form || (staff ? st.form_staff || "full" : st.form || "full");
   const one = form === "oneline";
   const showTab = st.show_tab_no === true || st.show_tab_no === "true";
   const pos = x => x.position;
@@ -1760,8 +1778,11 @@ async function exportXlsx() {
   }
   const errs = res.issues.filter(i => i.level === "err").length;
   if (errs && !confirm(`У перевірці ${errs} помилок. Все одно сформувати файл?`)) return;
+  let form = null;
+  const lost = hiddenHours(res);
+  if (lost && confirm(`За цей місяць є ${lost}, а скорочена форма цих колонок не показує.\n\nСформувати табель за цей місяць у повній формі? (Скасувати — лишити скорочену.)`)) form = "full";
   try {
-    const wb = buildWorkbook(ExcelJS, snap, only, { kind, fillDate: fill, settings: S.settings });
+    const wb = buildWorkbook(ExcelJS, snap, only, { kind, fillDate: fill, settings: S.settings, form });
     await downloadWorkbook(wb, fileName(kind, S.ym, S.sheet, toDay));
   } catch (e) { console.error(e); alert("Не вдалося сформувати файл: " + e.message); }
 }
