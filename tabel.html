@@ -1788,6 +1788,18 @@ function buildWorkbook(ExcelJSLib, snap, rowsToShow, opt) {
   merge(RR("BB"), null, { border: true });
   r += span + 2;
 
+  // ---------- умовні позначення (лише коди, що є в цьому табелі) ----------
+  {
+    const used = new Set();
+    for (const x of rows) for (const c of x.cells) if (c && c[0] && !["Р", "X"].includes(c[0])) used.add(c[0]);
+    if (used.size) {
+      const cn = Object.fromEntries((opt.codes || []).map(c => [c.code, c]));
+      const txt = [...used].sort().map(c => `${c}${cn[c]?.num ? " (" + String(cn[c].num).padStart(2, "0") + ")" : ""} — ${cn[c]?.name || c}`).join("; ");
+      merge(`A${r}:BB${r}`, `Умовні позначення: ${txt}.`, { size: 10, h: "left", wrap: true });
+      ws.getRow(r).height = txt.length > 220 ? 30 : 16;
+      r += 2;
+    }
+  }
   // ---------- примітка, відповідальна особа ----------
   const notes = staff ? [] : String(st.note_lines || "").split(/\r?\n/).filter(s => s.trim());
   if (notes.length) {
@@ -1930,8 +1942,8 @@ function buildWorkbookDev(ExcelJSLib, snap, rowsToShow, opt) {
   r += 2;
 
   // ---------- умовні позначення, примітка, підпис ----------
-  const codeName = Object.fromEntries((opt.codes || []).map(c => [c.code, c.name]));
-  const legend = [...used].sort().map(c => `${c} — ${codeName[c] || c}`).join("; ");
+  const cn = Object.fromEntries((opt.codes || []).map(c => [c.code, c]));
+  const legend = [...used].sort().map(c => `${c}${cn[c]?.num ? " (" + String(cn[c].num).padStart(2, "0") + ")" : ""} — ${cn[c]?.name || c}`).join("; ");
   merge(r, 1, r, lastCol, `Умовні позначення: ${legend ? legend + "; " : ""}порожня клітинка в робочий день — явка на роботу; виділено — вихідні та святкові дні.`, { size: 9, h: "left", wrap: true });
   ws.getRow(r).height = legend.length > 120 ? 28 : 16;
   r++;
