@@ -1414,7 +1414,7 @@ async function delSheet(id) {
 // =====================================================================
 //  НАЛАШТУВАННЯ
 // =====================================================================
-const FORM_OPTS = [["full", "повна (П-5): коди й години"], ["short", "скорочена: без нічних, вечірніх, вихідних/святкових, окладу"], ["oneline", "однорядкова: один рядок на посаду"]];
+const FORM_OPTS = [["dev", "табель відхилень: лише неявки, навантаження й підсумки"], ["full", "повна (П-5): коди й години"], ["short", "скорочена: без нічних, вечірніх, вихідних/святкових, окладу"], ["oneline", "однорядкова: один рядок на посаду"]];
 function renderSettings() {
   const s = S.settings || {}, ed = canEdit() ? "" : "disabled";
   const f = (label, field, wide) => `<div ${wide ? 'style="grid-column:1/-1"' : ""}><label>${label}</label>
@@ -1577,6 +1577,7 @@ function buildWorkbook(ExcelJSLib, snap, rowsToShow, opt) {
   const staff = snap.sheet === "staff";
   // full | short | oneline — окремо для табеля педпрацівників (form) і персоналу (form_staff)
   const form = opt.form || (staff ? st.form_staff || "full" : st.form || "full");
+  if (form === "dev") return buildWorkbookDev(ExcelJSLib, snap, rowsToShow, opt);
   const one = form === "oneline";
   const showTab = st.show_tab_no === true || st.show_tab_no === "true";
   const pos = x => x.position;
@@ -1805,6 +1806,149 @@ function buildWorkbook(ExcelJSLib, snap, rowsToShow, opt) {
   return wb;
 }
 
+/* ТАБЕЛЬ ВІДХИЛЕНЬ (метод обліку відхилень).
+   Один рядок на посаду. У клітинках дня — лише коди неявок; порожньо в робочий день = явка.
+   Вихідні й святкові стовпці виділено кольором. Праворуч: навантаження (год/тиж або ставка),
+   дні виходу, фактично відпрацьовані години, пропущені години, години замін. */
+function buildWorkbookDev(ExcelJSLib, snap, rowsToShow, opt) {
+  const st = opt.settings || {};
+  const staff = snap.sheet === "staff";
+  const [y, m] = snap.month.split("-").map(Number);
+  const nDays = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const toDay = snap.to_day || nDays;
+  const rows = rowsToShow ? snap.rows.filter(r => rowsToShow.includes(r.row_id)) : snap.rows;
+  const paper = st.paper || "A4";
+  const wb = new ExcelJSLib.Workbook();
+  wb.creator = "admin_school · табель";
+  const ws = wb.addWorksheet("Табель", {
+    pageSetup: { paperSize: paper === "A3" ? 8 : 9, orientation: "landscape", fitToPage: true, fitToWidth: 1, fitToHeight: 0,
+                 margins: { left: 0.4, right: 0.3, top: 0.5, bottom: 0.5, header: 0.3, footer: 0.3 }, printTitlesRow: "10:11" },
+    views: [{ showGridLines: false }]
+  });
+  const D0 = 5;                                   // день 1 → колонка E
+  const C = { no: 1, name: 2, pos: 3, load: 4, d: k => D0 + k - 1, days: D0 + 31, fact: D0 + 32, miss: D0 + 33, zam: D0 + 34 };
+  const L = colLetter;
+  const W = { 1: 4, 2: 24, 3: 20, 4: 6.5 };
+  for (let c = 1; c <= C.zam; c++) ws.getColumn(c).width = W[c] || (c >= D0 && c < D0 + 31 ? 3.4 : 6.5);
+  for (let k = nDays + 1; k <= 31; k++) ws.getColumn(C.d(k)).hidden = true;
+  const WE = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE4DCF0" } };   // вихідні / святкові
+  const OUT = { type: "pattern", pattern: "solid", fgColor: { argb: "FFEFEFEF" } };  // поза періодом роботи
+  const cell = (r, c, v, o = {}) => {
+    const x = ws.getCell(r, c);
+    if (v !== undefined && v !== null && v !== "") x.value = v;
+    x.font = { name: XF, size: o.size || 10, bold: !!o.bold };
+    x.alignment = { horizontal: o.h || "center", vertical: o.v || "middle", wrapText: !!o.wrap, textRotation: o.rot || 0, shrinkToFit: !!o.shrink };
+    if (o.border) x.border = BORDER;
+    if (o.fill) x.fill = o.fill;
+    return x;
+  };
+  const merge = (r1, c1, r2, c2, v, o = {}) => {
+    if (r1 !== r2 || c1 !== c2) ws.mergeCells(r1, c1, r2, c2);
+    cell(r1, c1, v, o);
+    if (o.border || o.fill) for (let r = r1; r <= r2; r++) for (let c = c1; c <= c2; c++) {
+      if (o.border) ws.getCell(r, c).border = BORDER;
+      if (o.fill) ws.getCell(r, c).fill = o.fill;
+    }
+  };
+  const r1 = v => v ? Math.round(v * 10) / 10 : null;
+  const lastCol = C.zam;
+  // неробочі дні: субота, неділя або день, у який у всіх рядках X / порожньо (святковий за календарем)
+  const nonWork = {};
+  for (let d = 1; d <= nDays; d++) {
+    const wd = (new Date(Date.UTC(y, m - 1, d)).getUTCDay() + 6) % 7;
+    const allOff = rows.length && rows.every(x => !x.cells[d - 1] || ["X", ""].includes(x.cells[d - 1][0]));
+    nonWork[d] = wd >= 5 || allOff;
+  }
+
+  // ---------- шапка ----------
+  const prefix = { "коригуючий": "КОРИГУЮЧИЙ ", "уточнюючий": "УТОЧНЮЮЧИЙ ", "проміжний": "ПРОМІЖНИЙ " }[opt.kind] || "";
+  const title = staff ? (st.title_staff || "ТАБЕЛЬ ОБЛІКУ ВИКОРИСТАННЯ РОБОЧОГО ЧАСУ ОБСЛУГОВУЮЧОГО ПЕРСОНАЛУ")
+                      : (st.title || "ТАБЕЛЬ ОБЛІКУ ВИКОРИСТАННЯ РОБОЧОГО ЧАСУ ПЕДАГОГІЧНИХ ПРАЦІВНИКІВ");
+  const mid = C.d(Math.min(22, nDays));
+  merge(1, 1, 1, mid, st.institution || "", { size: 12, bold: true, h: "left" });
+  cell(2, 1, st.edrpou ? `Ідентифікаційний код ЄДРПОУ ${st.edrpou}` : "", { size: 10, h: "left" });
+  merge(1, mid + 1, 1, lastCol, "ЗАТВЕРДЖУЮ", { size: 11, h: "left" });
+  merge(2, mid + 1, 2, lastCol, st.approver_position || "Директор", { size: 11, h: "left" });
+  merge(3, mid + 1, 3, lastCol, `____________ ${st.approver_name || ""}`, { size: 11, h: "left" });
+  merge(4, mid + 1, 4, lastCol, '"___" ____________ 20___ р.', { size: 10, h: "left" });
+  merge(6, 1, 6, lastCol, prefix + title, { size: 13, bold: true });
+  merge(7, 1, 7, lastCol, `за ${MONTHS[m - 1]} ${y} року`, { size: 12, bold: true });
+  merge(8, 1, 8, lastCol, `Звітний період: з ${uaDate(snap.month)} по ${uaDate(isoDate(y, m, toDay))}      Дата складання: ${uaDate(opt.fillDate)}`, { size: 10 });
+  [1, 2, 3, 4, 6, 7, 8].forEach(r => ws.getRow(r).height = 16);
+  ws.getRow(5).height = 6; ws.getRow(9).height = 6;
+
+  // ---------- шапка таблиці (рядки 10–11) ----------
+  const hb = { border: true, wrap: true, size: 9 };
+  merge(10, C.no, 11, C.no, "№ з/п", hb);
+  merge(10, C.name, 11, C.name, "Прізвище, ім'я, по батькові", hb);
+  merge(10, C.pos, 11, C.pos, "Посада", hb);
+  merge(10, C.load, 11, C.load, staff ? "Ставка" : "Наванта-ження, год/тиж (ставка)", { ...hb, rot: 90, size: 8 });
+  merge(10, C.d(1), 10, C.d(nDays), "Відмітки про неявки за числами місяця (порожньо — явка)", hb);
+  for (let d = 1; d <= nDays; d++) cell(11, C.d(d), d, { ...hb, fill: nonWork[d] ? WE : undefined });
+  merge(10, C.days, 11, C.days, "Дні виходу", { ...hb, rot: 90 });
+  merge(10, C.fact, 11, C.fact, "Фактично відпрацьовано, год", { ...hb, rot: 90, size: 8 });
+  merge(10, C.miss, 11, C.miss, "Пропущено, год", { ...hb, rot: 90 });
+  merge(10, C.zam, 11, C.zam, "Заміни, год", { ...hb, rot: 90 });
+  ws.getRow(10).height = 22; ws.getRow(11).height = 62;
+
+  // ---------- рядки ----------
+  let r = 12;
+  const used = new Set();
+  const T = { days: 0, fact: 0, miss: 0, zam: 0 };
+  rows.forEach((x, i) => {
+    ws.getRow(r).height = 27;
+    cell(r, C.no, i + 1, { border: true, size: 9 });
+    cell(r, C.name, `${x.name}${x.name_note ? " " + x.name_note : ""}`, { border: true, h: "left", size: 9, wrap: true });
+    cell(r, C.pos, x.position, { border: true, h: "left", size: 8, wrap: true });
+    const teach = /^вчител|гурт/i.test(x.position || "");
+    const loadV = teach ? (x.load ? Math.round(x.load * 10) / 10 : null)
+                        : (x.rate != null ? Number(Math.round(x.rate * 100) / 100) : null);   // адміністрація, персонал — ставка
+    cell(r, C.load, loadV, { border: true, bold: true, size: 9 });
+    for (let d = 1; d <= nDays; d++) {
+      const c = x.cells[d - 1] || ["", ""];
+      const code = c[0];
+      const absence = code && !["Р", "X", "РС", "РВ"].includes(code);
+      const out = code === "" && !nonWork[d];          // поза періодом роботи (прийом / звільнення / після «по»)
+      if (absence) used.add(code);
+      cell(r, C.d(d), absence ? code : null, { border: true, size: 8, fill: nonWork[d] ? WE : out ? OUT : undefined });
+    }
+    const t = x.tot || {};
+    const fact = (t.hours || 0) - (t.zam || 0), miss = t.absHours || 0, zam = t.zam || 0;
+    T.days += t.days || 0; T.fact += fact; T.miss += miss; T.zam += zam;
+    cell(r, C.days, t.days || null, { border: true, bold: true, size: 9 });
+    cell(r, C.fact, r1(fact), { border: true, size: 9 });
+    cell(r, C.miss, r1(miss), { border: true, size: 9 });
+    cell(r, C.zam, r1(zam), { border: true, size: 9 });
+    r++;
+  });
+  merge(r, 1, r, C.d(nDays), "РАЗОМ:", { border: true, bold: true, h: "right", size: 10 });
+  cell(r, C.load, null, { border: true });
+  cell(r, C.days, T.days || null, { border: true, bold: true, size: 9 });
+  cell(r, C.fact, r1(T.fact), { border: true, bold: true, size: 9 });
+  cell(r, C.miss, r1(T.miss), { border: true, bold: true, size: 9 });
+  cell(r, C.zam, r1(T.zam), { border: true, bold: true, size: 9 });
+  r += 2;
+
+  // ---------- умовні позначення, примітка, підпис ----------
+  const codeName = Object.fromEntries((opt.codes || []).map(c => [c.code, c.name]));
+  const legend = [...used].sort().map(c => `${c} — ${codeName[c] || c}`).join("; ");
+  merge(r, 1, r, lastCol, `Умовні позначення: ${legend ? legend + "; " : ""}порожня клітинка в робочий день — явка на роботу; виділено — вихідні та святкові дні.`, { size: 9, h: "left", wrap: true });
+  ws.getRow(r).height = legend.length > 120 ? 28 : 16;
+  r++;
+  merge(r, 1, r, lastCol, "Фактично відпрацьовано — години за розкладом у дні явки; пропущено — години за розкладом у дні неявки; заміни — години заміщення відсутніх працівників (за наказами).", { size: 9, h: "left", wrap: true });
+  ws.getRow(r).height = 16;
+  r += 2;
+  const respPos = staff ? (st.responsible_position_staff || st.responsible_position) : st.responsible_position;
+  const respName = staff ? (st.responsible_name_staff || st.responsible_name) : st.responsible_name;
+  cell(r, 1, "Відповідальна особа:", { size: 10, bold: true, h: "left" });
+  merge(r, C.pos, r, C.d(14), respPos || "", { size: 10, h: "left" });
+  merge(r, C.d(16), r, lastCol, `____________ ${respName || ""}`, { size: 10, h: "left" });
+  merge(r + 1, C.d(16), r + 1, C.d(20), "(підпис)", { size: 8, h: "left" });
+  cell(r + 2, 1, `Дата: ${uaDate(opt.fillDate)}`, { size: 10, h: "left" });
+  ws.pageSetup.printArea = `A1:${L(lastCol)}${r + 2}`;
+  return wb;
+}
+
 async function downloadWorkbook(wb, name) {
   const buf = await wb.xlsx.writeBuffer();
   const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
@@ -1840,7 +1984,7 @@ async function exportXlsx() {
   const lost = hiddenHours(res);
   if (lost && confirm(`За цей місяць є ${lost}, а скорочена форма цих колонок не показує.\n\nСформувати табель за цей місяць у повній формі? (Скасувати — лишити скорочену.)`)) form = "full";
   try {
-    const wb = buildWorkbook(ExcelJS, snap, only, { kind, fillDate: fill, settings: S.settings, form });
+    const wb = buildWorkbook(ExcelJS, snap, only, { kind, fillDate: fill, settings: S.settings, form, codes: S.codes });
     await downloadWorkbook(wb, fileName(kind, S.ym, S.sheet, toDay));
   } catch (e) { console.error(e); alert("Не вдалося сформувати файл: " + e.message); }
 }
@@ -1852,10 +1996,10 @@ async function exportSnapshot(id) {
     const prev = S.sheets.filter(x => x.created_at < s.created_at && x.kind !== "проміжний").at(-1);
     if (prev) { const d = diffSnapshots(prev.snapshot, s.snapshot); only = [...d.changed, ...d.added]; }
   }
-  const wb = buildWorkbook(ExcelJS, s.snapshot, only, { kind: s.kind, fillDate: s.fill_date, settings: S.settings });
+  const wb = buildWorkbook(ExcelJS, s.snapshot, only, { kind: s.kind, fillDate: s.fill_date, settings: S.settings, codes: S.codes });
   await downloadWorkbook(wb, fileName(s.kind, S.ym, s.sheet, s.to_day));
 }
-if (typeof module !== "undefined") module.exports = { buildWorkbook };
+if (typeof module !== "undefined") module.exports = { buildWorkbook, buildWorkbookDev };
 </script>
 </body>
 </html>
